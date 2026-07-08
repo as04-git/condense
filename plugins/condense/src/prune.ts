@@ -152,37 +152,40 @@ export function isCondenseNotice(text: string): boolean {
 
 // --- Injected user-role content (skill dumps, command output, structured
 // injections) -------------------------------------------------------------
-// A genuine user message is stored as STRING content (typed or pasted). Only
-// INJECTED content lands as a list of blocks. So: string content is always
-// user prose and never a candidate; a list-content user message whose text
-// exceeds the floor is injected reference material the model can shed.
+// Discriminator (verified empirically across real sessions): genuine user
+// messages — typed OR pasted, however long, with or without images — are
+// ALWAYS `isMeta` absent. Injected/system content (skill dumps, /command
+// output, session-context, post-compaction notices) is ALWAYS `isMeta === true`.
+// So requiring isMeta===true never touches real user prose. We additionally
+// require list content + a text floor: this scopes candidates to the big
+// skill/injection dumps (the reclaim wins) while the small isMeta boundary
+// notice stays under the floor. (String isMeta injections like /context output
+// are left for a future enhancement — safe, just not yet reclaimed.)
 
 const INJECT_FLOOR_CHARS = 4000;
 
 // Skill invocations emit a user message whose first text block starts with this
 // marker; the last path segment is the skill name (re-invokable to reload).
-const SKILL_MARKER = /^Base directory for this skill:\s*(\S+)/;
+// Capture the rest of the line (not just non-space) so paths with spaces work.
+const SKILL_MARKER = /^Base directory for this skill:\s*(.+)/;
 
 export function injectedInfo(
   row: unknown,
 ): { size: number; skill: string | null } | null {
-  // NOTE: skill invocations are marked isMeta:true by Claude Code, so we do NOT
-  // exclude isMeta rows — they are exactly what we want to catch. The condense
-  // boundary is also isMeta but has STRING content, so the list-content check
-  // below protects it (and any other small/plain meta row).
   if (!isRecord(row) || row["type"] !== "user") return null;
+  if (row["isMeta"] !== true) return null; // genuine user prose is never isMeta
   const msg = row["message"];
   if (!isRecord(msg)) return null;
   const content = msg["content"];
-  if (!Array.isArray(content)) return null; // string content = real user prose
+  if (!Array.isArray(content)) return null; // string content = plain notice, not a big dump
   // tool_result user rows are handled by the tool-output path, not here.
   if (content.some((b) => isRecord(b) && b["type"] === "tool_result")) return null;
   const text = content
     .filter((b) => isRecord(b) && b["type"] === "text")
     .map((b) => String((b as JsonRecord)["text"] ?? ""))
     .join("\n");
-  if (text.length < INJECT_FLOOR_CHARS) return null; // small structured msg / image paste
+  if (text.length < INJECT_FLOOR_CHARS) return null;
   const m = text.match(SKILL_MARKER);
-  const skill = m ? (m[1].split("/").filter(Boolean).pop() ?? null) : null;
+  const skill = m ? (m[1].trim().split("/").filter(Boolean).pop() ?? null) : null;
   return { size: text.length, skill };
 }

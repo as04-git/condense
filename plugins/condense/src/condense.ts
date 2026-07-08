@@ -8,7 +8,7 @@
 //
 // This keeps the whole user story to two tool calls: analyze, then build.
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runAnalyze } from "./analyze";
@@ -29,11 +29,24 @@ function locateTranscript(): string {
   } catch {
     throw new Error(`Claude projects directory not found: ${base}`);
   }
+  const matches: string[] = [];
   for (const dir of dirs) {
     const p = join(base, dir, `${sid}.jsonl`);
-    if (existsSync(p)) return p;
+    if (existsSync(p)) matches.push(p);
   }
-  throw new Error(`Transcript for session ${sid} not found under ${base}`);
+  if (matches.length === 0) {
+    throw new Error(`Transcript for session ${sid} not found under ${base}`);
+  }
+  if (matches.length > 1) {
+    // Session IDs are UUIDs, so this should be impossible — but if a transcript
+    // was copied across projects, pick the most-recently-modified and warn
+    // rather than silently resolving to an arbitrary one.
+    matches.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    console.error(
+      `condense: WARNING — ${matches.length} transcripts match session ${sid}; using newest:\n  ${matches.join("\n  ")}`,
+    );
+  }
+  return matches[0];
 }
 
 async function readStdin(): Promise<string> {
@@ -47,7 +60,14 @@ async function main(): Promise<void> {
   const transcript = locateTranscript();
 
   if (cmd === "analyze") {
-    const keepTurns = rest[0] ? Math.max(0, Number(rest[0])) : 1;
+    let keepTurns = 1;
+    if (rest[0] !== undefined) {
+      const n = Number(rest[0]);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new Error(`invalid keepTurns "${rest[0]}" — must be a non-negative number.`);
+      }
+      keepTurns = Math.floor(n);
+    }
     const rows = await readActiveTranscriptRows(transcript);
     console.log(JSON.stringify(runAnalyze(rows, keepTurns)));
     return;

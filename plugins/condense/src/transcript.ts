@@ -308,10 +308,19 @@ async function readTranscriptEntries(
   transcriptPath: string,
 ): Promise<unknown[]> {
   const content = await readFile(transcriptPath, "utf8");
-  return content
-    .split("\n")
-    .filter(line => line.trim() !== "")
-    .map(line => JSON.parse(line) as unknown);
+  const lines = content.split("\n").filter(line => line.trim() !== "");
+  const entries: unknown[] = [];
+  lines.forEach((line, i) => {
+    try {
+      entries.push(JSON.parse(line) as unknown);
+    } catch (err) {
+      // The current session is live and may be mid-append: tolerate a single
+      // unparseable trailing line. Any other parse error is a real corruption.
+      if (i === lines.length - 1) return;
+      throw err;
+    }
+  });
+  return entries;
 }
 
 function isPreservedMetadataEntry(entry: JsonRecord): boolean {

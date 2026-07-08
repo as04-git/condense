@@ -122,7 +122,14 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
 // a session; only the latest is meaningful. Each condense preserves the whole
 // history, so without this they compound every generation (like custom-title
 // did). custom-title is handled separately by withCondensedTitle.
-const SINGLETON_META = new Set(["agent-name", "mode", "last-prompt"]);
+const SINGLETON_META = new Set([
+  "agent-name",
+  "mode",
+  "last-prompt",
+  "permission-mode",
+  "ai-title",
+  "agent-color",
+]);
 
 function dedupeSingletonMeta(entries: JsonRecord[]): JsonRecord[] {
   const lastIndex = new Map<string, number>();
@@ -140,20 +147,37 @@ function dedupeSingletonMeta(entries: JsonRecord[]): JsonRecord[] {
 // (0 if the parent was never condensed). The boundary's generation field is not
 // in the active chain, so the title is the durable carrier.
 function parentGeneration(metadataEntries: JsonRecord[]): number {
+  let max = 0;
   for (const e of metadataEntries) {
-    if (isRecord(e) && e["type"] === "custom-title" && typeof e["customTitle"] === "string") {
+    if (!isRecord(e) || e["type"] !== "custom-title") continue;
+    // Prefer a durable numeric field; fall back to parsing the title text.
+    if (typeof e["condenseGeneration"] === "number" && e["condenseGeneration"] > max) {
+      max = e["condenseGeneration"];
+    } else if (typeof e["customTitle"] === "string") {
       const m = e["customTitle"].match(/^🗜 condense #(\d+) —/u);
-      if (m) return Number(m[1]);
+      if (m && Number(m[1]) > max) max = Number(m[1]);
     }
   }
-  return 0;
+  return max;
 }
 
 function firstUserPrompt(rows: TranscriptRow[]): string {
   for (const row of rows) {
-    if (row.type === "user" && row["isMeta"] !== true && isRecord(row.message)) {
-      const c = row.message["content"];
-      if (typeof c === "string" && c.trim()) return c.trim();
+    if (row.type !== "user" || row["isMeta"] === true || !isRecord(row.message)) continue;
+    const c = row.message["content"];
+    if (typeof c === "string") {
+      if (c.trim()) return c.trim();
+      continue;
+    }
+    if (Array.isArray(c)) {
+      // Skip tool-result rows; otherwise take the first text from a list message.
+      if (c.some((b) => isRecord(b) && b["type"] === "tool_result")) continue;
+      const text = c
+        .filter((b) => isRecord(b) && b["type"] === "text")
+        .map((b) => String((b as JsonRecord)["text"] ?? ""))
+        .join(" ")
+        .trim();
+      if (text) return text;
     }
   }
   return "session";
@@ -191,7 +215,12 @@ function withCondensedTitle(
   const withoutTitles = metadataEntries.filter(
     (e) => !(isRecord(e) && e["type"] === "custom-title"),
   );
-  return [{ type: "custom-title", customTitle, sessionId }, ...withoutTitles];
+  // condenseGeneration is a durable numeric carrier so the counter survives even
+  // if the emoji/em-dash title text is ever normalized (regex is the fallback).
+  return [
+    { type: "custom-title", customTitle, sessionId, condenseGeneration: generation },
+    ...withoutTitles,
+  ];
 }
 
 function normalizeRanking(value: unknown): Ranking {
@@ -380,25 +409,24 @@ function applyInjectedMode(
   }
   if (!isRecord(row.message)) return;
   const content = row.message["content"];
-  const text = Array.isArray(content)
-    ? content
-        .filter((b) => isRecord(b) && b["type"] === "text")
-        .map((b) => String((b as JsonRecord)["text"] ?? ""))
-        .join("\n")
-    : "";
+  // Store the FULL original content (all blocks), not just text, so retrieval
+  // reconstructs the row faithfully even if it held non-text blocks.
+  const stored = Array.isArray(content) ? JSON.stringify(content) : String(content ?? "");
+  // Always allocate a Content-ID — even for skill dumps. Skills are reloadable,
+  // but if the skill-marker heuristic ever misclassifies a non-skill blob, the
+  // Content-ID is the safety net against data loss.
+  const contentId = allocateOmission(io.cache, io.sessionId, stored);
 
   let notice: string;
   if (inj.skill) {
-    // Skill output is deterministically reloadable — don't store it, just say so.
     notice =
       `[Skill "${inj.skill}" output (${inj.size} chars) was omitted by condense to reclaim context. `
       + `This was NOT the user's message — it is skill-injected reference material. `
-      + `If you need it again, re-invoke the skill (type /${inj.skill}, or use the Skill tool with skill "${inj.skill}").]`;
+      + `If you need it again, re-invoke the skill (type /${inj.skill}, or use the Skill tool with skill "${inj.skill}"); `
+      + `or retrieve the exact bytes with read_omitted_content (Content ID: ${contentId}).]`;
     stats.injectedSkillNoted += 1;
   } else {
-    // Generic injection — store to a retrievable Content-ID.
-    const contentId = allocateOmission(io.cache, io.sessionId, text);
-    notice = outputOmissionNotice("Injected content omitted by condense", text.length, contentId);
+    notice = outputOmissionNotice("Injected content omitted by condense", inj.size, contentId);
     stats.injectedPrunedToContentId += 1;
   }
   row.message["content"] = [{ type: "text", text: notice }];
