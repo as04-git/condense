@@ -95,7 +95,7 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
       generation,
     );
     const titledMetadata = withCondensedTitle(
-      metadataEntries,
+      dedupeSingletonMeta(metadataEntries),
       rows,
       destination.sessionId,
       generation,
@@ -116,6 +116,24 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
     await unlink(destination.transcriptPath).catch(() => undefined);
     throw error;
   }
+}
+
+// Current-state singleton meta rows that Claude Code rewrites repeatedly during
+// a session; only the latest is meaningful. Each condense preserves the whole
+// history, so without this they compound every generation (like custom-title
+// did). custom-title is handled separately by withCondensedTitle.
+const SINGLETON_META = new Set(["agent-name", "mode", "last-prompt"]);
+
+function dedupeSingletonMeta(entries: JsonRecord[]): JsonRecord[] {
+  const lastIndex = new Map<string, number>();
+  entries.forEach((e, i) => {
+    const t = isRecord(e) ? String(e["type"]) : "";
+    if (SINGLETON_META.has(t)) lastIndex.set(t, i);
+  });
+  return entries.filter((e, i) => {
+    const t = isRecord(e) ? String(e["type"]) : "";
+    return !SINGLETON_META.has(t) || lastIndex.get(t) === i;
+  });
 }
 
 // The parent's generation, read from its preserved "🗜 condense #N —" title
