@@ -1,0 +1,16 @@
+{
+  "name": "condense",
+  "version": "0.1.0",
+  "description": "In-session, model-ranked lossless context condensation for Claude Code.",
+  "type": "module",
+  "author": "Aryan Shrivastava",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.3"
+  },
+  "files": [
+    ".claude-plugin",
+    ".mcp.json",
+    "skills",
+    "src"
+  ]
+}
