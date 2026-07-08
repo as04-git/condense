@@ -41,6 +41,7 @@ type ToolOutputStat = {
 
 type ThinkingStat = {
   turn: number;
+  uuid: string; // source row uuid (unambiguous across multiple assistant rows in a turn)
   blockIndex: number;
   signatureSize: number;
 };
@@ -196,7 +197,12 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
             st.thinkingSig += sig;
             st.thinkingBlocks += 1;
             typeTotals.thinking += blockText(b);
-            thinkingBlocks.push({ turn: ti, blockIndex: bi, signatureSize: sig });
+            thinkingBlocks.push({
+              turn: ti,
+              uuid: row.uuid,
+              blockIndex: bi,
+              signatureSize: sig,
+            });
           } else if (isRecord(b) && b["type"] === "tool_use") {
             st.toolInput += blockText(b);
             st.toolCalls += 1;
@@ -296,6 +302,7 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
       .filter((t) => t.turn < n - keepTurns)
       .map((t) => ({
         turn: t.turn,
+        uuid: t.uuid,
         blockIndex: t.blockIndex,
         signatureSize: t.signatureSize,
       })),
