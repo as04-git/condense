@@ -26,7 +26,13 @@ import {
   outputOmissionNotice,
   saveOmissionCache,
 } from "./omission";
-import { bigInputSize, injectedInfo, isCondenseNotice, pruneToolInput } from "./prune";
+import {
+  bigInputSize,
+  hasPrunedInput,
+  injectedInfo,
+  isCondenseNotice,
+  pruneToolInput,
+} from "./prune";
 import {
   buildAssistantTurns,
   createTranscriptSession,
@@ -389,8 +395,10 @@ async function buildCompactedRows(
     thinkingDropped: 0,
     toolInputsKept: 0,
     toolInputsPruned: 0,
+    toolInputsPrePruned: 0,
     toolOutputsKept: 0,
     toolOutputsPruned: 0,
+    toolOutputsPrePruned: 0,
     injectedKept: 0,
     injectedPrunedToContentId: 0,
     injectedSkillNoted: 0,
@@ -507,18 +515,23 @@ function condenseMarkerText(
     thinkingDropped: number;
     toolInputsKept: number;
     toolInputsPruned: number;
+    toolInputsPrePruned: number;
     toolOutputsKept: number;
     toolOutputsPruned: number;
+    toolOutputsPrePruned: number;
     injectedPrunedToContentId: number;
     injectedSkillNoted: number;
     skillsNoted: string[];
   },
 ): string {
   const skills = stats.skillsNoted.length ? ` [${stats.skillsNoted.join(", ")}]` : "";
+  const prePrunedOut = stats.toolOutputsPrePruned;
+  const prePrunedIn = stats.toolInputsPrePruned;
   const lines = [
     `🗜 CONDENSED SESSION (generation ${generation}) — you are now inside the condensed result.`,
     `Continue the work below; do NOT re-condense unless the user asks. This marker is deterministic (built from the build step's own tallies) — trust it over memory for what is present vs pruned.`,
-    `Pruned, all recoverable:`,
+    ``,
+    `FRESHLY PRUNED this generation (bytes just moved out; recoverable):`,
     `  • ${stats.toolOutputsPruned} tool-output(s) + ${stats.toolInputsPruned} tool-input(s) — placeholder inline; retrieve exact bytes with read_omitted_content <Content-ID shown at each placeholder>.`,
   ];
   if (stats.injectedSkillNoted > 0) {
@@ -533,7 +546,14 @@ function condenseMarkerText(
   }
   lines.push(
     `  • ${stats.thinkingDropped} thinking block(s) dropped — prior reasoning; NOT recoverable, but all prose is intact.`,
-    `Kept inline: ${stats.toolOutputsKept} tool-output(s), ${stats.toolInputsKept} tool-input(s), ${stats.thinkingKept} thinking block(s). All prose (your text + user messages) and the last ${keepTurns} turn(s) are fully untouched.`,
+    ``,
+    `ALREADY PRUNED by an earlier generation (still just placeholders inline; recoverable):`,
+    `  • ${prePrunedOut} tool-output(s) + ${prePrunedIn} tool-input(s) — retrieve with read_omitted_content <Content-ID at each placeholder>.`,
+    ``,
+    `GENUINELY KEPT INLINE (full content present, nothing to retrieve):`,
+    `  • ${stats.toolOutputsKept} tool-output(s), ${stats.toolInputsKept} tool-input(s), ${stats.thinkingKept} thinking block(s).`,
+    `  • ALL prose (your text + user messages) and the last ${keepTurns} turn(s) — fully untouched.`,
+    ``,
     `Condensed from parent session ${sourceSessionId} (unchanged on disk — /resume it to see everything un-pruned).`,
   );
   return lines.join("\n");
@@ -623,7 +643,7 @@ function applyToolInputMode(
   mode: Mode,
   keepInputs: Set<string>,
   io: { cache: Parameters<typeof allocateOmission>[0]; sessionId: string },
-  stats: { toolInputsKept: number; toolInputsPruned: number },
+  stats: { toolInputsKept: number; toolInputsPruned: number; toolInputsPrePruned: number },
 ): void {
   if (!isRecord(row.message)) return;
   const content = row.message["content"];
@@ -631,6 +651,10 @@ function applyToolInputMode(
 
   for (const block of content) {
     if (!isRecord(block) || block["type"] !== "tool_use") continue;
+    if (hasPrunedInput(block)) {
+      stats.toolInputsPrePruned += 1; // pruned by an earlier condense
+      continue;
+    }
     if (bigInputSize(block) === 0) continue; // small input: always kept verbatim
     const toolUseId = typeof block["id"] === "string" ? block["id"] : null;
     const keep =
@@ -654,7 +678,7 @@ function applyToolOutputMode(
   mode: Mode,
   keepTools: Set<string>,
   ctx: { cache: Parameters<typeof allocateOmission>[0]; sessionId: string },
-  stats: { toolOutputsKept: number; toolOutputsPruned: number },
+  stats: { toolOutputsKept: number; toolOutputsPruned: number; toolOutputsPrePruned: number },
 ): void {
   if (!isRecord(row.message)) return;
   const content = row.message["content"];
@@ -663,9 +687,16 @@ function applyToolOutputMode(
   for (const block of content) {
     if (!isRecord(block) || block["type"] !== "tool_result") continue;
     const text = stringifyContent(block["content"]);
-    // Always keep (never prune): errors (cheap + diagnostic), empties, and
-    // content that is already a condense notice (avoid nesting).
-    if (block["is_error"] === true || !text || isCondenseNotice(text)) {
+    // Content already pruned by an earlier condense: its bytes are NOT inline
+    // (only the notice is). Classify as pre-pruned, never as genuinely kept, and
+    // never re-prune (that would nest notice→notice).
+    if (text && isCondenseNotice(text)) {
+      stats.toolOutputsPrePruned += 1;
+      continue;
+    }
+    // Genuinely kept inline (full content present): errors (cheap + diagnostic)
+    // and empties.
+    if (block["is_error"] === true || !text) {
       stats.toolOutputsKept += 1;
       continue;
     }

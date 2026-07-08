@@ -150,6 +150,15 @@ export function isCondenseNotice(text: string): boolean {
   return text.includes("omitted by condense");
 }
 
+// True if this tool_use block's input was already pruned by an earlier condense
+// (it carries a "<field>_omission_notice" key). Used to classify inputs as
+// pre-pruned rather than genuinely-kept in the marker tallies.
+export function hasPrunedInput(block: unknown): boolean {
+  const ti = toolInput(block);
+  if (!ti) return false;
+  return Object.keys(ti.input).some((k) => k.endsWith("_omission_notice"));
+}
+
 // --- Injected user-role content (skill dumps, command output, structured
 // injections) -------------------------------------------------------------
 // Discriminator (verified empirically across real sessions): genuine user
