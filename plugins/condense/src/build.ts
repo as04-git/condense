@@ -168,18 +168,12 @@ function withCondensedTitle(
   if (base.length > 80) base = `${base.slice(0, 80).trim()}…`;
   const customTitle = `🗜 condense #${generation} — ${base}`;
 
-  let replaced = false;
-  const mapped = metadataEntries.map((e) => {
-    if (isRecord(e) && e["type"] === "custom-title") {
-      replaced = true;
-      return { ...e, customTitle, sessionId };
-    }
-    return e;
-  });
-  if (!replaced) {
-    mapped.unshift({ type: "custom-title", customTitle, sessionId });
-  }
-  return mapped;
+  // Emit exactly ONE custom-title row — drop every inherited/accumulated one so
+  // titles don't compound across generations (they otherwise grow each condense).
+  const withoutTitles = metadataEntries.filter(
+    (e) => !(isRecord(e) && e["type"] === "custom-title"),
+  );
+  return [{ type: "custom-title", customTitle, sessionId }, ...withoutTitles];
 }
 
 function normalizeRanking(value: unknown): Ranking {
