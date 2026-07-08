@@ -107,10 +107,21 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
       generation,
       ranking.title,
     );
-    await writeTranscriptEntries(destination.transcriptPath, [
-      ...titledMetadata,
-      ...compactedRows,
-    ]);
+    // Mint a clean clone identity (mirror what /branch does): a fresh unique
+    // slug so we don't share ~/.claude/plans/<slug>.md with ancestors, the
+    // lowercase session_id updated to the new id (copyRow only fixed sessionId),
+    // and forkedFrom dropped so the clone doesn't claim a false lineage (our
+    // marker records the true parent). Only overwrite fields that already exist
+    // so we never alter a row's shape.
+    const cloneSlug = `condense-${randomUUID().slice(0, 8)}`;
+    const allRows = [...titledMetadata, ...compactedRows];
+    for (const r of allRows) {
+      if (!isRecord(r)) continue;
+      if ("slug" in r) r["slug"] = cloneSlug;
+      if ("session_id" in r) r["session_id"] = destination.sessionId;
+      if ("forkedFrom" in r) delete r["forkedFrom"];
+    }
+    await writeTranscriptEntries(destination.transcriptPath, allRows);
 
     return {
       sessionId: destination.sessionId,
