@@ -26,7 +26,7 @@ import {
   outputOmissionNotice,
   saveOmissionCache,
 } from "./omission";
-import { bigInputSize, pruneToolInput } from "./prune";
+import { bigInputSize, injectedInfo, pruneToolInput } from "./prune";
 import {
   buildAssistantTurns,
   createTranscriptSession,
@@ -43,10 +43,13 @@ type Mode = "keep-all" | "keep-ranked" | "drop";
 
 type Ranking = {
   keepTurns: number;
-  modes: { thinking: Mode; tools: Mode };
+  modes: { thinking: Mode; attachments: Mode };
   keepThinking: { uuid: string; blockIndex: number }[];
-  keepToolOutputs: string[];
-  keepToolInputs: string[];
+  // Refs the model chose to KEEP inline. Each ref is one of:
+  //   "o:<toolUseId>"  tool-output attachment
+  //   "i:<toolUseId>"  tool-input attachment (big Write/Edit/Bash/... payload)
+  //   "s:<rowUuid>"    skill/injected attachment
+  keepAttachments: string[];
 };
 
 type Plan = {
@@ -65,13 +68,8 @@ function isCondenseBoundaryRow(row: TranscriptRow): boolean {
   return isRecord(c) && c["boundary"] === true;
 }
 
-async function main(): Promise<void> {
-  const [sourcePath, rankingPath] = Bun.argv.slice(2);
-  if (!sourcePath || !rankingPath) {
-    console.error("usage: bun build.ts <source_transcript_path> <ranking_json_path>");
-    process.exit(2);
-  }
-  const ranking = normalizeRanking(await Bun.file(rankingPath).json());
+export async function runBuild(sourcePath: string, rankingValue: unknown) {
+  const ranking = normalizeRanking(rankingValue);
 
   const destination = await createTranscriptSession(sourcePath);
   try {
@@ -96,13 +94,11 @@ async function main(): Promise<void> {
       ...compactedRows,
     ]);
 
-    console.log(
-      JSON.stringify({
-        sessionId: destination.sessionId,
-        transcriptPath: destination.transcriptPath,
-        stats,
-      }),
-    );
+    return {
+      sessionId: destination.sessionId,
+      transcriptPath: destination.transcriptPath,
+      stats,
+    };
   } catch (error) {
     await unlink(destination.transcriptPath).catch(() => undefined);
     throw error;
@@ -121,7 +117,7 @@ function normalizeRanking(value: unknown): Ranking {
         : 1,
     modes: {
       thinking: asMode(modes["thinking"], "keep-ranked"),
-      tools: asMode(modes["tools"], "keep-ranked"),
+      attachments: asMode(modes["attachments"], "keep-ranked"),
     },
     keepThinking: Array.isArray(v["keepThinking"])
       ? v["keepThinking"].flatMap((e) =>
@@ -130,11 +126,8 @@ function normalizeRanking(value: unknown): Ranking {
             : [],
         )
       : [],
-    keepToolOutputs: Array.isArray(v["keepToolOutputs"])
-      ? v["keepToolOutputs"].filter((x): x is string => typeof x === "string")
-      : [],
-    keepToolInputs: Array.isArray(v["keepToolInputs"])
-      ? v["keepToolInputs"].filter((x): x is string => typeof x === "string")
+    keepAttachments: Array.isArray(v["keepAttachments"])
+      ? v["keepAttachments"].filter((x): x is string => typeof x === "string")
       : [],
   };
 }
@@ -177,8 +170,8 @@ async function buildCompactedRows(
   const keepThinking = new Set(
     ranking.keepThinking.map((e) => `${e.uuid}#${e.blockIndex}`),
   );
-  const keepToolOutputs = new Set(ranking.keepToolOutputs);
-  const keepToolInputs = new Set(ranking.keepToolInputs);
+  const keepAttachments = new Set(ranking.keepAttachments);
+  const attachMode = ranking.modes.attachments;
 
   const stats = {
     thinkingKept: 0,
@@ -187,6 +180,9 @@ async function buildCompactedRows(
     toolInputsPruned: 0,
     toolOutputsKept: 0,
     toolOutputsPruned: 0,
+    injectedKept: 0,
+    injectedPrunedToContentId: 0,
+    injectedSkillNoted: 0,
     emptyAssistantRowsDropped: 0,
   };
 
@@ -232,7 +228,7 @@ async function buildCompactedRows(
 
       if (row.type === "assistant") {
         filterThinking(copied, row.uuid, ranking.modes.thinking, keepThinking, stats);
-        applyToolInputMode(copied, ranking.modes.tools, keepToolInputs, io, stats);
+        applyToolInputMode(copied, attachMode, keepAttachments, io, stats);
         if (isEmptyMessageContent(copied)) {
           // A thinking-only assistant message whose thinking was all dropped
           // would become content:[] — invalid on resume. Drop the row and
@@ -243,9 +239,13 @@ async function buildCompactedRows(
           continue; // do not push; do not advance parentUuid
         }
       } else if (isToolResultRow(row)) {
-        applyToolOutputMode(copied, ranking.modes.tools, keepToolOutputs, io, stats);
+        applyToolOutputMode(copied, attachMode, keepAttachments, io, stats);
+      } else if (row.type === "user") {
+        // Genuine user prose (string content) is untouched; only injected
+        // list-content (skill dumps / structured injections) is a rankable attachment.
+        applyInjectedMode(copied, row.uuid, attachMode, keepAttachments, io, stats);
       }
-      // human prompts / other rows: verbatim (already copied)
+      // everything else: verbatim (already copied)
 
       copiedUuids.set(row.uuid, copied.uuid);
       rows.push(copied);
@@ -262,6 +262,56 @@ async function buildCompactedRows(
 }
 
 // --- content handlers -------------------------------------------------------
+
+function applyInjectedMode(
+  row: TranscriptRow,
+  originalUuid: string,
+  mode: Mode,
+  keepInjected: Set<string>,
+  io: { cache: Parameters<typeof allocateOmission>[0]; sessionId: string },
+  stats: {
+    injectedKept: number;
+    injectedPrunedToContentId: number;
+    injectedSkillNoted: number;
+  },
+): void {
+  const inj = injectedInfo(row);
+  if (!inj) return; // not injected (genuine user prose) — leave verbatim
+  const keep =
+    mode === "keep-all"
+      ? true
+      : mode === "drop"
+        ? false
+        : keepInjected.has(`s:${originalUuid}`); // keep-ranked
+  if (keep) {
+    stats.injectedKept += 1;
+    return;
+  }
+  if (!isRecord(row.message)) return;
+  const content = row.message["content"];
+  const text = Array.isArray(content)
+    ? content
+        .filter((b) => isRecord(b) && b["type"] === "text")
+        .map((b) => String((b as JsonRecord)["text"] ?? ""))
+        .join("\n")
+    : "";
+
+  let notice: string;
+  if (inj.skill) {
+    // Skill output is deterministically reloadable — don't store it, just say so.
+    notice =
+      `[Skill "${inj.skill}" output (${inj.size} chars) was omitted by condense to reclaim context. `
+      + `This was NOT the user's message — it is skill-injected reference material. `
+      + `If you need it again, re-invoke the skill (type /${inj.skill}, or use the Skill tool with skill "${inj.skill}").]`;
+    stats.injectedSkillNoted += 1;
+  } else {
+    // Generic injection — store to a retrievable Content-ID.
+    const contentId = allocateOmission(io.cache, io.sessionId, text);
+    notice = outputOmissionNotice("Injected content omitted by condense", text.length, contentId);
+    stats.injectedPrunedToContentId += 1;
+  }
+  row.message["content"] = [{ type: "text", text: notice }];
+}
 
 function filterThinking(
   row: TranscriptRow,
@@ -309,7 +359,7 @@ function applyToolInputMode(
         ? true
         : mode === "drop"
           ? false
-          : toolUseId !== null && keepInputs.has(toolUseId); // keep-ranked
+          : toolUseId !== null && keepInputs.has(`i:${toolUseId}`); // keep-ranked
     if (keep) {
       stats.toolInputsKept += 1;
       continue;
@@ -344,7 +394,7 @@ function applyToolOutputMode(
         ? true
         : mode === "drop"
           ? false
-          : toolUseId !== null && keepTools.has(toolUseId); // keep-ranked
+          : toolUseId !== null && keepTools.has(`o:${toolUseId}`); // keep-ranked
     if (keep) {
       stats.toolOutputsKept += 1;
       continue;
@@ -441,4 +491,16 @@ function stringifyContent(content: unknown): string {
   return JSON.stringify(content);
 }
 
-await main();
+if (import.meta.main) {
+  const [sourcePath, rankingPath] = Bun.argv.slice(2);
+  if (!sourcePath || !rankingPath) {
+    console.error("usage: bun build.ts <source_transcript_path> <ranking_json_path>");
+    process.exit(2);
+  }
+  runBuild(sourcePath, await Bun.file(rankingPath).json())
+    .then((result) => console.log(JSON.stringify(result)))
+    .catch((err) => {
+      console.error(`build failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+}

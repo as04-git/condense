@@ -142,3 +142,40 @@ function stringifyContent(content: unknown): string {
   if (content === undefined || content === null) return "";
   return JSON.stringify(content);
 }
+
+// --- Injected user-role content (skill dumps, command output, structured
+// injections) -------------------------------------------------------------
+// A genuine user message is stored as STRING content (typed or pasted). Only
+// INJECTED content lands as a list of blocks. So: string content is always
+// user prose and never a candidate; a list-content user message whose text
+// exceeds the floor is injected reference material the model can shed.
+
+const INJECT_FLOOR_CHARS = 4000;
+
+// Skill invocations emit a user message whose first text block starts with this
+// marker; the last path segment is the skill name (re-invokable to reload).
+const SKILL_MARKER = /^Base directory for this skill:\s*(\S+)/;
+
+export function injectedInfo(
+  row: unknown,
+): { size: number; skill: string | null } | null {
+  // NOTE: skill invocations are marked isMeta:true by Claude Code, so we do NOT
+  // exclude isMeta rows — they are exactly what we want to catch. The condense
+  // boundary is also isMeta but has STRING content, so the list-content check
+  // below protects it (and any other small/plain meta row).
+  if (!isRecord(row) || row["type"] !== "user") return null;
+  const msg = row["message"];
+  if (!isRecord(msg)) return null;
+  const content = msg["content"];
+  if (!Array.isArray(content)) return null; // string content = real user prose
+  // tool_result user rows are handled by the tool-output path, not here.
+  if (content.some((b) => isRecord(b) && b["type"] === "tool_result")) return null;
+  const text = content
+    .filter((b) => isRecord(b) && b["type"] === "text")
+    .map((b) => String((b as JsonRecord)["text"] ?? ""))
+    .join("\n");
+  if (text.length < INJECT_FLOOR_CHARS) return null; // small structured msg / image paste
+  const m = text.match(SKILL_MARKER);
+  const skill = m ? (m[1].split("/").filter(Boolean).pop() ?? null) : null;
+  return { size: text.length, skill };
+}

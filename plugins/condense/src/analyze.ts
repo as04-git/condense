@@ -1,21 +1,17 @@
 // analyze.ts — mechanical stats pass for condense.
 //
 // Reads a Claude Code transcript, splits it into assistant turns (reusing the
-// same active-chain logic the build step uses), and prints a per-turn /
-// per-type / per-rankable-block breakdown. The in-session model reads this
-// output to make grounded keep/drop ranking decisions before the build step.
+// same active-chain logic the build step uses), and returns a per-turn /
+// per-type / per-attachment breakdown. The in-session model reads this to make
+// grounded keep/prune decisions before the build step.
 //
-// Usage: bun analyze.ts <transcript_path> [keepTurns]
-//
-// Note on "thinking size": the `thinking` text is empty on disk (display:
-// "omitted"); what is stored is an opaque `signature` blob that the server
-// decrypts to the real (larger) reasoning. So the byte sizes reported for
-// thinking are SIGNATURE bytes — a lower-bound proxy for the true live-context
-// weight, not the reasoning length. #blocks and turn position are the more
-// meaningful signals for ranking; the model supplies relevance from its own
-// in-context (decrypted) reasoning.
+// "Attachments" = the large, non-prose, non-reasoning, RECOVERABLE content the
+// model can shed: tool outputs (re-runnable), big tool inputs (on disk +
+// Content-ID), and injected/skill dumps (skills are re-invokable). Each carries
+// an anchor snippet so the model ranks by recognizing content, not guessing
+// turn numbers. Thinking is separate (opaque on disk; anchored by turn context).
 
-import { bigInputSize } from "./prune";
+import { bigInputSize, injectedInfo } from "./prune";
 import {
   buildAssistantTurns,
   isRecord,
@@ -24,39 +20,26 @@ import {
   type Turn,
 } from "./transcript";
 
-type BlockKind =
-  | "prose"
-  | "thinking"
-  | "tool_input"
-  | "tool_output"
-  | "human_prompt"
-  | "other";
-
-type ToolOutputStat = {
-  toolUseId: string | null;
+export type Attachment = {
+  ref: string; // "o:<toolUseId>" | "i:<toolUseId>" | "s:<rowUuid>"
+  kind: "tool-output" | "tool-input" | "skill" | "injected";
   turn: number;
-  toolName: string;
   size: number;
-  errored: boolean;
+  head: string; // anchor snippet
+  errored?: boolean;
+  skill?: string;
 };
 
 type ThinkingStat = {
   turn: number;
-  uuid: string; // source row uuid (unambiguous across multiple assistant rows in a turn)
+  uuid: string;
   blockIndex: number;
   signatureSize: number;
 };
 
-type ToolInputStat = {
-  toolUseId: string | null;
-  turn: number;
-  toolName: string;
-  size: number;
-};
-
 type TurnStat = {
   turn: number;
-  age: number; // turns from the end (0 = most recent)
+  age: number;
   userPrompt: string;
   prose: number;
   thinkingSig: number;
@@ -64,20 +47,22 @@ type TurnStat = {
   toolInput: number;
   toolOutput: number;
   toolCalls: number;
-  total: number;
 };
 
+type BlockKind =
+  | "prose"
+  | "thinking"
+  | "tool_input"
+  | "tool_output"
+  | "human_prompt"
+  | "injected"
+  | "other";
+
 function blockText(block: unknown): number {
-  if (typeof block === "string") return block.length;
-  if (!isRecord(block)) return JSON.stringify(block).length;
+  if (!isRecord(block)) return typeof block === "string" ? block.length : 0;
   const t = block["type"];
   if (t === "text") return String(block["text"] ?? "").length;
-  if (t === "thinking") {
-    return (
-      String(block["thinking"] ?? "").length
-      + String(block["signature"] ?? "").length
-    );
-  }
+  if (t === "thinking") return String(block["thinking"] ?? "").length;
   if (t === "tool_use") {
     return (
       JSON.stringify(block["input"] ?? {}).length
@@ -93,6 +78,24 @@ function blockText(block: unknown): number {
   return JSON.stringify(block).length;
 }
 
+function stringify(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (content === undefined || content === null) return "";
+  if (Array.isArray(content)) {
+    return content
+      .map((b) =>
+        isRecord(b) && typeof b["text"] === "string" ? b["text"] : stringify(b),
+      )
+      .join(" ");
+  }
+  return JSON.stringify(content);
+}
+
+function preview(s: string, n = 140): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length <= n ? flat : `${flat.slice(0, n)}…`;
+}
+
 function signatureSize(block: unknown): number {
   return isRecord(block) ? String(block["signature"] ?? "").length : 0;
 }
@@ -100,13 +103,10 @@ function signatureSize(block: unknown): number {
 function isToolResultRow(row: TranscriptRow): boolean {
   if (row.type !== "user" || !isRecord(row.message)) return false;
   const c = row.message["content"];
-  return (
-    Array.isArray(c)
-    && c.some((b) => isRecord(b) && b["type"] === "tool_result")
-  );
+  return Array.isArray(c) && c.some((b) => isRecord(b) && b["type"] === "tool_result");
 }
 
-function firstLine(text: string, max = 90): string {
+function firstLine(text: string, max = 100): string {
   const line = text.trim().split("\n")[0]?.trim() ?? "";
   return line.length <= max ? line : `${line.slice(0, max).trim()}…`;
 }
@@ -126,29 +126,12 @@ function userPromptText(turn: Turn): string {
   return firstLine(parts.join("\n"));
 }
 
-function main(): void {
-  const [transcriptPath, keepTurnsArg] = Bun.argv.slice(2);
-  if (!transcriptPath) {
-    console.error("usage: bun analyze.ts <transcript_path> [keepTurns]");
-    process.exit(2);
-  }
-  const keepTurns = keepTurnsArg ? Math.max(0, Number(keepTurnsArg)) : 1;
-
-  readActiveTranscriptRows(transcriptPath)
-    .then((rows) => report(rows, keepTurns))
-    .catch((err) => {
-      console.error(`analyze failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    });
-}
-
-function report(rows: TranscriptRow[], keepTurns: number): void {
+export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
   const turns = buildAssistantTurns(rows);
   const n = turns.length;
 
   const turnStats: TurnStat[] = [];
-  const toolOutputs: ToolOutputStat[] = [];
-  const toolInputs: ToolInputStat[] = [];
+  const attachments: Attachment[] = [];
   const thinkingBlocks: ThinkingStat[] = [];
   const typeTotals: Record<BlockKind, number> = {
     prose: 0,
@@ -156,10 +139,10 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
     tool_input: 0,
     tool_output: 0,
     human_prompt: 0,
+    injected: 0,
     other: 0,
   };
 
-  // Map tool_use_id -> tool name (names come from assistant tool_use blocks).
   const toolNames = new Map<string, string>();
   for (const turn of turns) {
     for (const row of turn.rows) {
@@ -190,7 +173,6 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
       toolInput: 0,
       toolOutput: 0,
       toolCalls: 0,
-      total: 0,
     };
 
     turn.rows.forEach((row) => {
@@ -205,24 +187,23 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
             const sig = signatureSize(b);
             st.thinkingSig += sig;
             st.thinkingBlocks += 1;
-            typeTotals.thinking += blockText(b);
-            thinkingBlocks.push({
-              turn: ti,
-              uuid: row.uuid,
-              blockIndex: bi,
-              signatureSize: sig,
-            });
+            // thinking TEXT is empty on disk (display:omitted); count the
+            // signature bytes as a (lower-bound) proxy for its context weight.
+            typeTotals.thinking += sig;
+            thinkingBlocks.push({ turn: ti, uuid: row.uuid, blockIndex: bi, signatureSize: sig });
           } else if (isRecord(b) && b["type"] === "tool_use") {
             st.toolInput += blockText(b);
             st.toolCalls += 1;
             typeTotals.tool_input += blockText(b);
             const bigIn = bigInputSize(b);
-            if (bigIn > 0) {
-              toolInputs.push({
-                toolUseId: typeof b["id"] === "string" ? b["id"] : null,
+            const id = typeof b["id"] === "string" ? b["id"] : null;
+            if (bigIn > 0 && id) {
+              attachments.push({
+                ref: `i:${id}`,
+                kind: "tool-input",
                 turn: ti,
-                toolName: typeof b["name"] === "string" ? b["name"] : "?",
                 size: bigIn,
+                head: `${String(b["name"] ?? "?")}: ${preview(stringify(b["input"]))}`,
               });
             }
           } else {
@@ -237,111 +218,104 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
               const size = blockText(b);
               st.toolOutput += size;
               typeTotals.tool_output += size;
-              const toolUseId =
-                typeof b["tool_use_id"] === "string" ? b["tool_use_id"] : null;
-              toolOutputs.push({
-                toolUseId,
-                turn: ti,
-                toolName: (toolUseId && toolNames.get(toolUseId)) || "?",
-                size,
-                errored: b["is_error"] === true,
-              });
+              const id = typeof b["tool_use_id"] === "string" ? b["tool_use_id"] : null;
+              const errored = b["is_error"] === true;
+              if (id && !errored) {
+                attachments.push({
+                  ref: `o:${id}`,
+                  kind: "tool-output",
+                  turn: ti,
+                  size,
+                  head: `${toolNames.get(id) ?? "?"}: ${preview(stringify(b["content"]))}`,
+                  errored,
+                });
+              }
             } else {
-              st.toolOutput += blockText(b);
               typeTotals.tool_output += blockText(b);
             }
           }
         } else {
           const s = blocks.reduce((acc, b) => acc + blockText(b), 0);
-          st.prose += 0; // human prompt, tracked separately
-          typeTotals.human_prompt += s;
+          const inj = injectedInfo(row);
+          if (inj) {
+            typeTotals.injected += s;
+            attachments.push({
+              ref: `s:${row.uuid}`,
+              kind: inj.skill ? "skill" : "injected",
+              turn: ti,
+              size: inj.size,
+              head: preview(stringify(content)),
+              skill: inj.skill ?? undefined,
+            });
+          } else {
+            typeTotals.human_prompt += s;
+          }
         }
       }
     });
 
-    st.total = st.prose + st.thinkingSig + st.toolInput + st.toolOutput;
     turnStats.push(st);
   });
 
   const grand = Object.values(typeTotals).reduce((a, b) => a + b, 0) || 1;
-  const rankableTurns = turnStats.filter((t) => t.age >= keepTurns);
+  const rankable = (turn: number) => turn < n - keepTurns;
 
-  // Projected reclaim (chars) if a whole class is removed from the rankable region.
-  const rankableToolOut = toolOutputs
-    .filter((t) => t.turn < n - keepTurns)
-    .reduce((a, t) => a + t.size, 0);
-  const rankableToolIn = toolInputs
-    .filter((t) => t.turn < n - keepTurns)
-    .reduce((a, t) => a + t.size, 0);
-  const rankableThinkingSig = thinkingBlocks
-    .filter((t) => t.turn < n - keepTurns)
-    .reduce((a, t) => a + t.signatureSize, 0);
+  const rankableAttachments = attachments
+    .filter((a) => rankable(a.turn))
+    .sort((a, b) => b.size - a.size);
+  const rankableThinking = thinkingBlocks.filter((t) => rankable(t.turn));
 
-  const out = {
+  return {
     summary: {
       turns: n,
       keepTurns,
-      rankableTurns: rankableTurns.length,
+      rankableTurns: turnStats.filter((t) => t.age >= keepTurns).length,
       totalChars: grand,
       approxTokens: Math.round(grand / 4),
     },
     typeBreakdown: Object.fromEntries(
       (Object.keys(typeTotals) as BlockKind[]).map((k) => [
         k,
-        { chars: typeTotals[k], pct: +((100 * typeTotals[k]) / grand).toFixed(1) },
+        { chars: typeTotals[k], pct: Math.round((typeTotals[k] / grand) * 1000) / 10 },
       ]),
     ),
     projectedReclaim: {
-      toolOutputs_chars: rankableToolOut,
-      toolInputs_chars: rankableToolIn,
-      thinking_signatures_chars: rankableThinkingSig,
+      attachments_chars: rankableAttachments.reduce((a, x) => a + x.size, 0),
+      thinking_signature_chars: rankableThinking.reduce((a, x) => a + x.signatureSize, 0),
       note:
-        "tool-I/O reclaim (inputs + outputs) is lossless (retrievable Content-IDs). thinking reclaim shown is SIGNATURE bytes only; true live-context reclaim is larger (decrypted reasoning). keepTurns region excluded.",
+        "attachment reclaim is lossless: tool outputs re-runnable, inputs on disk + Content-ID, skills re-invokable. thinking reclaim shown is SIGNATURE bytes only; true live-context reclaim is larger (decrypted reasoning). keepTurns region excluded.",
     },
     perTurn: turnStats.map((t) => ({
       turn: t.turn,
       age: t.age,
-      inKeepTurns: t.age < keepTurns,
       prompt: t.userPrompt,
       prose: t.prose,
-      thinking: `${t.thinkingBlocks}blk/${t.thinkingSig}sig`,
-      toolIn: t.toolInput,
-      toolOut: t.toolOutput,
-      calls: t.toolCalls,
-      total: t.total,
+      thinkingBlocks: t.thinkingBlocks,
+      toolCalls: t.toolCalls,
+      toolInput: t.toolInput,
+      toolOutput: t.toolOutput,
     })),
-    rankableToolOutputs: toolOutputs
-      .filter((t) => t.turn < n - keepTurns)
-      .sort((a, b) => b.size - a.size)
-      .map((t) => ({
-        toolUseId: t.toolUseId,
-        turn: t.turn,
-        tool: t.toolName,
-        side: "output",
-        size: t.size,
-        errored: t.errored,
-      })),
-    rankableToolInputs: toolInputs
-      .filter((t) => t.turn < n - keepTurns)
-      .sort((a, b) => b.size - a.size)
-      .map((t) => ({
-        toolUseId: t.toolUseId,
-        turn: t.turn,
-        tool: t.toolName,
-        side: "input",
-        size: t.size,
-      })),
-    rankableThinking: thinkingBlocks
-      .filter((t) => t.turn < n - keepTurns)
-      .map((t) => ({
-        turn: t.turn,
-        uuid: t.uuid,
-        blockIndex: t.blockIndex,
-        signatureSize: t.signatureSize,
-      })),
+    rankableAttachments,
+    rankableThinking: rankableThinking.map((t) => ({
+      turn: t.turn,
+      uuid: t.uuid,
+      blockIndex: t.blockIndex,
+      signatureSize: t.signatureSize,
+    })),
   };
-
-  console.log(JSON.stringify(out, null, 2));
 }
 
-main();
+if (import.meta.main) {
+  const [transcriptPath, keepTurnsArg] = Bun.argv.slice(2);
+  if (!transcriptPath) {
+    console.error("usage: bun analyze.ts <transcript_path> [keepTurns]");
+    process.exit(2);
+  }
+  const keepTurns = keepTurnsArg ? Math.max(0, Number(keepTurnsArg)) : 1;
+  readActiveTranscriptRows(transcriptPath)
+    .then((rows) => console.log(JSON.stringify(runAnalyze(rows, keepTurns))))
+    .catch((err) => {
+      console.error(`analyze failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    });
+}
