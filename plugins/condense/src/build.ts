@@ -110,16 +110,22 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
     // Mint a clean clone identity (mirror what /branch does): a fresh unique
     // slug so we don't share ~/.claude/plans/<slug>.md with ancestors, the
     // lowercase session_id updated to the new id (copyRow only fixed sessionId),
-    // and forkedFrom dropped so the clone doesn't claim a false lineage (our
-    // marker records the true parent). Only overwrite fields that already exist
-    // so we never alter a row's shape.
+    // and forkedFrom repointed to the TRUE immediate parent (the session we
+    // condensed) so lineage reflects the previous generation. Only overwrite
+    // slug/session_id where they already exist so we never alter a row's shape.
     const cloneSlug = `condense-${randomUUID().slice(0, 8)}`;
+    const parentSessionId = plan.baseRow.sessionId;
     const allRows = [...titledMetadata, ...compactedRows];
     for (const r of allRows) {
       if (!isRecord(r)) continue;
+      // Load-bearing invariant (source: metadata resolves by
+      // map.get(leafMessage.sessionId)): EVERY row's sessionId must equal the
+      // new id or the title silently vanishes. copyRow set it on message rows;
+      // enforce it uniformly here as a backstop.
+      r["sessionId"] = destination.sessionId;
       if ("slug" in r) r["slug"] = cloneSlug;
       if ("session_id" in r) r["session_id"] = destination.sessionId;
-      if ("forkedFrom" in r) delete r["forkedFrom"];
+      if ("forkedFrom" in r) r["forkedFrom"] = { sessionId: parentSessionId };
     }
     await writeTranscriptEntries(destination.transcriptPath, allRows);
 
@@ -139,13 +145,19 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
 // a session; only the latest is meaningful. Each condense preserves the whole
 // history, so without this they compound every generation (like custom-title
 // did). custom-title is handled separately by withCondensedTitle.
+// Current-state singleton meta types (last-wins per sessionId, confirmed from
+// v2.1.88 sessionStorage re-stamp logic). agent-name / custom-title / ai-title
+// are owned by withCondensedTitle; the rest are deduped to their last occurrence
+// so they don't compound across generations.
 const SINGLETON_META = new Set([
-  "agent-name",
   "mode",
   "last-prompt",
   "permission-mode",
-  "ai-title",
   "agent-color",
+  "agent-setting",
+  "worktree-state",
+  "pr-link",
+  "tag",
 ]);
 
 function dedupeSingletonMeta(entries: JsonRecord[]): JsonRecord[] {
@@ -227,16 +239,29 @@ function withCondensedTitle(
   if (base.length > 80) base = `${base.slice(0, 80).trim()}…`;
   const customTitle = `🗜 condense #${generation} — ${base}`;
 
-  // Emit exactly ONE custom-title row — drop every inherited/accumulated one so
-  // titles don't compound across generations (they otherwise grow each condense).
-  const withoutTitles = metadataEntries.filter(
-    (e) => !(isRecord(e) && e["type"] === "custom-title"),
+  // Claude Code feeds the two title surfaces from two DIFFERENT rows (confirmed
+  // from v2.1.88 source): the /resume picker + tab title read `custom-title`,
+  // while the in-app banner pill reads `agent-name` (agentNames.get(sessionId)).
+  // /rename writes BOTH with the same value; a clone that writes only
+  // custom-title leaves the parent's stale agent-name as last-wins -> fresh
+  // picker, stale banner. So we mirror /rename: strip every inherited
+  // custom-title / agent-name / ai-title (ai-title is never re-appended by CC —
+  // custom-title always wins) and emit one fresh pair keyed to the new session.
+  const stripped = metadataEntries.filter(
+    (e) =>
+      !(
+        isRecord(e) &&
+        (e["type"] === "custom-title" ||
+          e["type"] === "agent-name" ||
+          e["type"] === "ai-title")
+      ),
   );
   // condenseGeneration is a durable numeric carrier so the counter survives even
   // if the emoji/em-dash title text is ever normalized (regex is the fallback).
   return [
     { type: "custom-title", customTitle, sessionId, condenseGeneration: generation },
-    ...withoutTitles,
+    { type: "agent-name", agentName: customTitle, sessionId },
+    ...stripped,
   ];
 }
 
