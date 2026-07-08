@@ -74,7 +74,13 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
 
   const destination = await createTranscriptSession(sourcePath);
   try {
-    const rows = await readActiveTranscriptRows(sourcePath);
+    // Drop any prior condense marker (a visible, non-meta row) so markers don't
+    // accumulate across generations — each condense re-emits exactly one fresh
+    // marker at the tail. (isMeta rows auto-drop; the visible marker won't, so
+    // strip it explicitly by its sentinel field.)
+    const rows = (await readActiveTranscriptRows(sourcePath)).filter(
+      (r) => !(isRecord(r) && r["condenseMarker"] === true),
+    );
     const plan = createPlan(rows, ranking.keepTurns);
     if (plan.compactedTurns.length === 0) {
       throw new Error("Nothing to compact: no turns older than keepTurns.");
@@ -414,15 +420,17 @@ async function buildCompactedRows(
   // (auto-replaced next condense) and never re-detected as an injected attachment.
   const sourceSessionId =
     typeof plan.baseRow.sessionId === "string" ? plan.baseRow.sessionId : "unknown";
+  // VISIBLE (non-meta) user row so the human sees it on resume and can verify
+  // delivery directly — not just a model-only meta row. Content is a string, so
+  // it is never re-detected as an injected attachment; condenseMarker:true lets
+  // the next condense strip it (see runBuild) so markers don't accumulate.
   rows.push({
     ...copySessionFields(plan.baseRow, sessionId, timestamp),
     type: "user",
     uuid: randomUUID(),
     parentUuid,
-    isMeta: true,
     condenseMarker: true,
     message: {
-      id: `msg_${randomUUID()}`,
       role: "user",
       content: condenseMarkerText(sourceSessionId, generation, ranking.keepTurns, stats),
     },
