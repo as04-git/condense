@@ -37,9 +37,11 @@ bun ~/.claude/condense/plugins/condense/src/condense.ts analyze <keepTurns>
 
 Pass the ranking inline:
 ```bash
-bun ~/.claude/condense/plugins/condense/src/condense.ts build '{"keepTurns":1,"modes":{"thinking":"keep-ranked","attachments":"keep-ranked"},"keepThinking":[{"uuid":"…","blockIndex":0}],"keepAttachments":["o:toolu_…","i:toolu_…","s:…"]}'
+bun ~/.claude/condense/plugins/condense/src/condense.ts build '{"keepTurns":1,"title":"…optional…","modes":{"thinking":"keep-ranked","attachments":"keep-ranked"},"keepThinking":[{"uuid":"…","blockIndex":0}],"keepAttachments":["o:toolu_…","i:toolu_…","s:…"]}'
 ```
-Modes: `keep-all` (keep everything of that class), `keep-ranked` (keep only the listed refs/blocks), `drop` (shed all — leave the keep-list empty). Prints `{ sessionId, transcriptPath, stats }`.
+Modes: `keep-all` (keep everything of that class), `keep-ranked` (keep only the listed refs/blocks), `drop` (shed all — leave the keep-list empty). Prints `{ sessionId, transcriptPath, generation, stats }`.
+
+**Optional `title`** — the compacted session is titled `🗜 condense #N — <desc>` (N auto-increments across repeated condensing). By default `<desc>` is derived from the session's first prompt; set `"title"` in the ranking to give a better one-line description of what the session is about (the `#N` prefix is always kept). Do this when the first prompt is a poor descriptor of the actual work.
 
 ## Step 4 — Report
 

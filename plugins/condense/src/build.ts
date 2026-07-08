@@ -26,7 +26,7 @@ import {
   outputOmissionNotice,
   saveOmissionCache,
 } from "./omission";
-import { bigInputSize, injectedInfo, pruneToolInput } from "./prune";
+import { bigInputSize, injectedInfo, isCondenseNotice, pruneToolInput } from "./prune";
 import {
   buildAssistantTurns,
   createTranscriptSession,
@@ -43,6 +43,7 @@ type Mode = "keep-all" | "keep-ranked" | "drop";
 
 type Ranking = {
   keepTurns: number;
+  title?: string; // optional: override the descriptive part of the session title
   modes: { thinking: Mode; attachments: Mode };
   keepThinking: { uuid: string; blockIndex: number }[];
   // Refs the model chose to KEEP inline. Each ref is one of:
@@ -79,30 +80,106 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
       throw new Error("Nothing to compact: no turns older than keepTurns.");
     }
 
-    const { compactedRows, stats } = await buildCompactedRows(
-      plan,
-      destination.sessionId,
-      ranking,
-    );
+    // Generation is read from the parent's preserved "condense #N" title — the
+    // boundary's generation field is NOT in the active chain, but the title is.
     const metadataEntries = await readPreservedMetadataEntries(
       sourcePath,
       plan.baseRow.sessionId,
       destination.sessionId,
     );
+    const generation = parentGeneration(metadataEntries) + 1;
+    const { compactedRows, stats } = await buildCompactedRows(
+      plan,
+      destination.sessionId,
+      ranking,
+      generation,
+    );
+    const titledMetadata = withCondensedTitle(
+      metadataEntries,
+      rows,
+      destination.sessionId,
+      generation,
+      ranking.title,
+    );
     await writeTranscriptEntries(destination.transcriptPath, [
-      ...metadataEntries,
+      ...titledMetadata,
       ...compactedRows,
     ]);
 
     return {
       sessionId: destination.sessionId,
       transcriptPath: destination.transcriptPath,
+      generation,
       stats,
     };
   } catch (error) {
     await unlink(destination.transcriptPath).catch(() => undefined);
     throw error;
   }
+}
+
+// The parent's generation, read from its preserved "🗜 condense #N —" title
+// (0 if the parent was never condensed). The boundary's generation field is not
+// in the active chain, so the title is the durable carrier.
+function parentGeneration(metadataEntries: JsonRecord[]): number {
+  for (const e of metadataEntries) {
+    if (isRecord(e) && e["type"] === "custom-title" && typeof e["customTitle"] === "string") {
+      const m = e["customTitle"].match(/^🗜 condense #(\d+) —/u);
+      if (m) return Number(m[1]);
+    }
+  }
+  return 0;
+}
+
+function firstUserPrompt(rows: TranscriptRow[]): string {
+  for (const row of rows) {
+    if (row.type === "user" && row["isMeta"] !== true && isRecord(row.message)) {
+      const c = row.message["content"];
+      if (typeof c === "string" && c.trim()) return c.trim();
+    }
+  }
+  return "session";
+}
+
+// Session title for the compacted session: "🗜 condense #N — <base>". N is the
+// generation (survives repeated condensing via the boundary's generation field);
+// <base> strips any prior condense/branch decoration so titles don't stack.
+function withCondensedTitle(
+  metadataEntries: JsonRecord[],
+  rows: TranscriptRow[],
+  sessionId: string,
+  generation: number,
+  titleOverride?: string,
+): JsonRecord[] {
+  let base = titleOverride ?? "";
+  if (!base) {
+    // If the parent was already a condensed session ("🗜 condense #N — <desc>"),
+    // carry its <desc> forward (strip the prefix). Otherwise derive from the
+    // first user prompt — not the parent's auto/branch title.
+    let parent = "";
+    for (const e of metadataEntries) {
+      if (isRecord(e) && e["type"] === "custom-title" && typeof e["customTitle"] === "string") {
+        parent = e["customTitle"];
+      }
+    }
+    const m = parent.match(/^🗜 condense #\d+ — (.+)$/u);
+    base = m ? m[1].trim() : firstUserPrompt(rows);
+  }
+  if (base.length > 80) base = `${base.slice(0, 80).trim()}…`;
+  const customTitle = `🗜 condense #${generation} — ${base}`;
+
+  let replaced = false;
+  const mapped = metadataEntries.map((e) => {
+    if (isRecord(e) && e["type"] === "custom-title") {
+      replaced = true;
+      return { ...e, customTitle, sessionId };
+    }
+    return e;
+  });
+  if (!replaced) {
+    mapped.unshift({ type: "custom-title", customTitle, sessionId });
+  }
+  return mapped;
 }
 
 function normalizeRanking(value: unknown): Ranking {
@@ -115,6 +192,7 @@ function normalizeRanking(value: unknown): Ranking {
       typeof v["keepTurns"] === "number" && Number.isFinite(v["keepTurns"])
         ? Math.max(0, Math.floor(v["keepTurns"]))
         : 1,
+    title: typeof v["title"] === "string" && v["title"].trim() ? v["title"].trim() : undefined,
     modes: {
       thinking: asMode(modes["thinking"], "keep-ranked"),
       attachments: asMode(modes["attachments"], "keep-ranked"),
@@ -162,6 +240,7 @@ async function buildCompactedRows(
   plan: Plan,
   sessionId: string,
   ranking: Ranking,
+  generation: number,
 ): Promise<{ compactedRows: TranscriptRow[]; stats: JsonRecord }> {
   const rows: TranscriptRow[] = [];
   const copiedUuids = new Map<string, string>();
@@ -207,7 +286,7 @@ async function buildCompactedRows(
       content: POST_COMPACTION_NOTICE,
     },
     logicalParentUuid: lastOriginalRow.uuid,
-    condense: { boundary: true },
+    condense: { boundary: true, generation },
   });
   let parentUuid: string | null = boundaryUuid;
 
@@ -383,9 +462,12 @@ function applyToolOutputMode(
 
   for (const block of content) {
     if (!isRecord(block) || block["type"] !== "tool_result") continue;
-    if (block["is_error"] === true) {
+    const text = stringifyContent(block["content"]);
+    // Always keep (never prune): errors (cheap + diagnostic), empties, and
+    // content that is already a condense notice (avoid nesting).
+    if (block["is_error"] === true || !text || isCondenseNotice(text)) {
       stats.toolOutputsKept += 1;
-      continue; // errors are cheap + diagnostic; always keep
+      continue;
     }
     const toolUseId =
       typeof block["tool_use_id"] === "string" ? block["tool_use_id"] : null;
@@ -396,11 +478,6 @@ function applyToolOutputMode(
           ? false
           : toolUseId !== null && keepTools.has(`o:${toolUseId}`); // keep-ranked
     if (keep) {
-      stats.toolOutputsKept += 1;
-      continue;
-    }
-    const text = stringifyContent(block["content"]);
-    if (!text) {
       stats.toolOutputsKept += 1;
       continue;
     }

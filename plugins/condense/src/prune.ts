@@ -143,6 +143,13 @@ function stringifyContent(content: unknown): string {
   return JSON.stringify(content);
 }
 
+// Already-pruned content carries this marker. Re-condensing must NOT re-prune a
+// notice (that would nest notice→notice→original and force multi-hop retrieval);
+// the existing notice already points at the original Content-ID or skill.
+export function isCondenseNotice(text: string): boolean {
+  return text.includes("omitted by condense");
+}
+
 // --- Injected user-role content (skill dumps, command output, structured
 // injections) -------------------------------------------------------------
 // A genuine user message is stored as STRING content (typed or pasted). Only

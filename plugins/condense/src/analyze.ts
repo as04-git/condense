@@ -11,7 +11,7 @@
 // an anchor snippet so the model ranks by recognizing content, not guessing
 // turn numbers. Thinking is separate (opaque on disk; anchored by turn context).
 
-import { bigInputSize, injectedInfo } from "./prune";
+import { bigInputSize, injectedInfo, isCondenseNotice } from "./prune";
 import {
   buildAssistantTurns,
   isRecord,
@@ -220,7 +220,9 @@ export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
               typeTotals.tool_output += size;
               const id = typeof b["tool_use_id"] === "string" ? b["tool_use_id"] : null;
               const errored = b["is_error"] === true;
-              if (id && !errored) {
+              // Skip already-pruned outputs (notices) — not reclaimable, and
+              // re-pruning them would nest notices.
+              if (id && !errored && !isCondenseNotice(stringify(b["content"]))) {
                 attachments.push({
                   ref: `o:${id}`,
                   kind: "tool-output",
