@@ -104,7 +104,8 @@ See [`CLAUDE.md`](./CLAUDE.md) for architecture and the invariants that keep
 ## Attribution & license
 
 Fork of [`claude-magic-compact`](https://github.com/aerovato/magic-compact) by
-kevinMEH / aerovato — the transcript-surgery, omission-store, and MCP-retrieval
-machinery originate there. Upstream ships without a license; this is a **private
-derivative work** and is not offered under an open-source license. Do not
-redistribute publicly without sorting out upstream licensing first.
+Kevin Liao @ Aerovato Research — the transcript-surgery, omission-store, and
+MCP-retrieval machinery originate there. That project is **BSD 3-Clause**
+licensed; this fork retains that license and adds the fork's modifications under
+the same terms. See [`LICENSE.md`](./LICENSE.md) (both copyright notices
+retained per the BSD-3 terms).
