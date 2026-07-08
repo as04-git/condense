@@ -26,7 +26,7 @@ import {
   outputOmissionNotice,
   saveOmissionCache,
 } from "./omission";
-import { pruneTranscriptRow } from "./prune";
+import { bigInputSize, pruneToolInput } from "./prune";
 import {
   buildAssistantTurns,
   createTranscriptSession,
@@ -46,6 +46,7 @@ type Ranking = {
   modes: { thinking: Mode; tools: Mode };
   keepThinking: { uuid: string; blockIndex: number }[];
   keepToolOutputs: string[];
+  keepToolInputs: string[];
 };
 
 type Plan = {
@@ -115,7 +116,9 @@ function normalizeRanking(value: unknown): Ranking {
     m === "keep-all" || m === "keep-ranked" || m === "drop" ? m : dflt;
   return {
     keepTurns:
-      typeof v["keepTurns"] === "number" ? Math.max(0, v["keepTurns"]) : 1,
+      typeof v["keepTurns"] === "number" && Number.isFinite(v["keepTurns"])
+        ? Math.max(0, Math.floor(v["keepTurns"]))
+        : 1,
     modes: {
       thinking: asMode(modes["thinking"], "keep-ranked"),
       tools: asMode(modes["tools"], "keep-ranked"),
@@ -129,6 +132,9 @@ function normalizeRanking(value: unknown): Ranking {
       : [],
     keepToolOutputs: Array.isArray(v["keepToolOutputs"])
       ? v["keepToolOutputs"].filter((x): x is string => typeof x === "string")
+      : [],
+    keepToolInputs: Array.isArray(v["keepToolInputs"])
+      ? v["keepToolInputs"].filter((x): x is string => typeof x === "string")
       : [],
   };
 }
@@ -166,20 +172,22 @@ async function buildCompactedRows(
 ): Promise<{ compactedRows: TranscriptRow[]; stats: JsonRecord }> {
   const rows: TranscriptRow[] = [];
   const copiedUuids = new Map<string, string>();
-  const completedToolUseIds = collectCompletedToolUseIds(plan.compactedTurns);
-  const toolNamesById = collectToolNamesById(plan.compactedTurns);
   const omissionCache = await loadOmissionCache(sessionId);
   const timestamp = new Date().toISOString();
   const keepThinking = new Set(
     ranking.keepThinking.map((e) => `${e.uuid}#${e.blockIndex}`),
   );
-  const keepTools = new Set(ranking.keepToolOutputs);
+  const keepToolOutputs = new Set(ranking.keepToolOutputs);
+  const keepToolInputs = new Set(ranking.keepToolInputs);
 
   const stats = {
     thinkingKept: 0,
     thinkingDropped: 0,
+    toolInputsKept: 0,
+    toolInputsPruned: 0,
     toolOutputsKept: 0,
     toolOutputsPruned: 0,
+    emptyAssistantRowsDropped: 0,
   };
 
   const lastOriginalRow = sourceTurns(plan)
@@ -212,9 +220,9 @@ async function buildCompactedRows(
     parentUuid = copyTurnVerbatim(turn, rows, copiedUuids, sessionId, timestamp, parentUuid);
   }
 
-  // Compacted region: prose verbatim; thinking per mode; tool outputs per mode;
-  // tool_use inputs shrunk mechanically (lossless).
-  const ctx = { cache: omissionCache, sessionId, completedToolUseIds, toolNamesById };
+  // Compacted region: prose verbatim; thinking per mode; tool inputs + outputs
+  // per the (shared) tools mode. keepTurns region left fully untouched.
+  const io = { cache: omissionCache, sessionId };
   for (const turn of plan.compactedTurns) {
     for (const row of turn.rows) {
       const newParent = row.parentUuid
@@ -224,9 +232,18 @@ async function buildCompactedRows(
 
       if (row.type === "assistant") {
         filterThinking(copied, row.uuid, ranking.modes.thinking, keepThinking, stats);
-        pruneTranscriptRow(copied, ctx); // shrinks large tool_use INPUTS only
+        applyToolInputMode(copied, ranking.modes.tools, keepToolInputs, io, stats);
+        if (isEmptyMessageContent(copied)) {
+          // A thinking-only assistant message whose thinking was all dropped
+          // would become content:[] — invalid on resume. Drop the row and
+          // rewire any children to its parent. Such rows carry no tool_use, so
+          // no tool_result depends on them.
+          copiedUuids.set(row.uuid, newParent ?? boundaryUuid);
+          stats.emptyAssistantRowsDropped += 1;
+          continue; // do not push; do not advance parentUuid
+        }
       } else if (isToolResultRow(row)) {
-        applyToolOutputMode(copied, ranking.modes.tools, keepTools, ctx, stats);
+        applyToolOutputMode(copied, ranking.modes.tools, keepToolOutputs, io, stats);
       }
       // human prompts / other rows: verbatim (already copied)
 
@@ -270,6 +287,37 @@ function filterThinking(
     return keep;
   });
   row.message["content"] = next;
+}
+
+function applyToolInputMode(
+  row: TranscriptRow,
+  mode: Mode,
+  keepInputs: Set<string>,
+  io: { cache: Parameters<typeof allocateOmission>[0]; sessionId: string },
+  stats: { toolInputsKept: number; toolInputsPruned: number },
+): void {
+  if (!isRecord(row.message)) return;
+  const content = row.message["content"];
+  if (!Array.isArray(content)) return;
+
+  for (const block of content) {
+    if (!isRecord(block) || block["type"] !== "tool_use") continue;
+    if (bigInputSize(block) === 0) continue; // small input: always kept verbatim
+    const toolUseId = typeof block["id"] === "string" ? block["id"] : null;
+    const keep =
+      mode === "keep-all"
+        ? true
+        : mode === "drop"
+          ? false
+          : toolUseId !== null && keepInputs.has(toolUseId); // keep-ranked
+    if (keep) {
+      stats.toolInputsKept += 1;
+      continue;
+    }
+    const pruned = pruneToolInput(block, io.cache, io.sessionId);
+    if (pruned > 0) stats.toolInputsPruned += 1;
+    else stats.toolInputsKept += 1;
+  }
 }
 
 function applyToolOutputMode(
@@ -366,50 +414,6 @@ function copySessionFields(
   return copied;
 }
 
-function collectCompletedToolUseIds(turns: Turn[]): Set<string> {
-  const ids = new Set<string>();
-  for (const turn of turns) {
-    for (const row of turn.rows) {
-      if (!isRecord(row.message)) continue;
-      const content = row.message["content"];
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (
-          isRecord(block)
-          && block["type"] === "tool_result"
-          && block["is_error"] !== true
-          && typeof block["tool_use_id"] === "string"
-        ) {
-          ids.add(block["tool_use_id"]);
-        }
-      }
-    }
-  }
-  return ids;
-}
-
-function collectToolNamesById(turns: Turn[]): Map<string, string> {
-  const names = new Map<string, string>();
-  for (const turn of turns) {
-    for (const row of turn.rows) {
-      if (!isRecord(row.message)) continue;
-      const content = row.message["content"];
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (
-          isRecord(block)
-          && block["type"] === "tool_use"
-          && typeof block["id"] === "string"
-          && typeof block["name"] === "string"
-        ) {
-          names.set(block["id"], block["name"]);
-        }
-      }
-    }
-  }
-  return names;
-}
-
 function isToolResultRow(row: TranscriptRow): boolean {
   if (row.type !== "user" || !isRecord(row.message)) return false;
   const content = row.message["content"];
@@ -421,6 +425,14 @@ function isToolResultRow(row: TranscriptRow): boolean {
 
 function sourceTurns(plan: Plan): Turn[] {
   return [...plan.prefixTurns, ...plan.compactedTurns, ...plan.preservedTurns];
+}
+
+function isEmptyMessageContent(row: TranscriptRow): boolean {
+  if (!isRecord(row.message)) return false;
+  const content = row.message["content"];
+  if (Array.isArray(content)) return content.length === 0;
+  if (typeof content === "string") return content.trim() === "";
+  return false;
 }
 
 function stringifyContent(content: unknown): string {

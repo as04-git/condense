@@ -11,8 +11,8 @@ Scaffold only. The orchestration (analyze → present stats → in-session ranki
 
 Design (locked):
 - **prose** — kept verbatim, always.
-- **tool-output** — modes `keep-all | keep-ranked | drop`; default `keep-ranked` (max ≈15). Removed outputs become retrievable Content-IDs via the `read_omitted_content` MCP tool.
-- **thinking** — modes `keep-all | keep-ranked | drop`; default `keep-ranked`. Ranking is done in-session by the model (which holds the decrypted reasoning) using the turn's reasoning + prose as signal; kept thinking blocks are byte-copied (signatures intact); dropped ones are removed.
+- **tool I/O** — one `tools` mode (`keep-all | keep-ranked | drop`, default `keep-ranked`) governs BOTH tool outputs and big tool inputs (Write/Edit/Bash/Agent/Workflow/etc.). Small inputs (filepaths, patterns) are always kept verbatim and are never ranking candidates. Removed I/O becomes retrievable Content-IDs via the `read_omitted_content` MCP tool. No size threshold decides keep/drop — the model's ranking does; a floor only decides which inputs are big enough to be candidates.
+- **thinking** — modes `keep-all | keep-ranked | drop`; default `keep-ranked`. Ranking is done in-session by the model (which holds the decrypted reasoning) using the turn's reasoning + prose as signal; kept thinking blocks are byte-copied (signatures intact); dropped ones are removed (thinking-only assistant rows that become empty are dropped and their children rewired).
 - **keepTurns** — recent turns left fully untouched. Default `1`.
 
 Until implemented, `/condense` does nothing useful. Do not rely on it.

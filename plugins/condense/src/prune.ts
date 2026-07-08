@@ -1,304 +1,144 @@
-import {
-  allocateOmission,
-  inputOmissionNotice,
-  outputOmissionNotice,
-} from "./omission";
-import { isRecord, type JsonRecord, type TranscriptRow } from "./transcript";
+// prune.ts — tool-INPUT candidacy + pruning for condense.
+//
+// condense does NOT use size thresholds to DECIDE what to shed — the model's
+// ranking does that. This module only:
+//   (a) identifies which tool_use inputs are big enough to be worth ranking
+//       (a floor, so tiny inputs like a filepath never clutter the candidate
+//       list or get a Content-ID), and
+//   (b) force-prunes a specific tool_use's big input to a retrievable
+//       Content-ID once the caller (build.ts, per the chosen mode) has decided
+//       to shed it.
+// Tool OUTPUTS are handled entirely in build.ts (applyToolOutputMode); there is
+// no output pruning here and no threshold governs any keep/drop decision.
+
+import { allocateOmission, inputOmissionNotice } from "./omission";
+import { isRecord, type JsonRecord } from "./transcript";
 
 type OmissionCache = Parameters<typeof allocateOmission>[0];
 
-type ToolContext = {
-  cache: OmissionCache;
-  sessionId: string;
-  completedToolUseIds: Set<string>;
-  toolNamesById: Map<string, string>;
+// Below this a tool input isn't worth turning into a Content-ID; such inputs
+// are always kept verbatim and never appear as ranking candidates.
+const INPUT_FLOOR_CHARS = 1024;
+
+type InputSpec =
+  | { kind: "omit"; fields: string[]; description: string }
+  | { kind: "truncate"; field: string; keep: number; description: string };
+
+// Per-tool big-input field map. Tools not listed have no large input worth
+// pruning (their inputs — filepaths, patterns, small args — stay verbatim).
+const INPUT_SPECS: Record<string, InputSpec> = {
+  Write: {
+    kind: "omit",
+    fields: ["content"],
+    description:
+      "File write contents omitted by condense. Reread the file for current contents, or retrieve the exact bytes with read_omitted_content.",
+  },
+  Edit: {
+    kind: "omit",
+    fields: ["old_string", "new_string"],
+    description:
+      "File edit strings omitted by condense. Reread the file for current contents, or retrieve with read_omitted_content.",
+  },
+  NotebookEdit: {
+    kind: "omit",
+    fields: ["new_source"],
+    description:
+      "Notebook edit source omitted by condense. Reread the notebook, or retrieve with read_omitted_content.",
+  },
+  Agent: {
+    kind: "omit",
+    fields: ["prompt"],
+    description: "Agent prompt omitted by condense. Retrieve with read_omitted_content if needed.",
+  },
+  Workflow: {
+    kind: "omit",
+    fields: ["script"],
+    description: "Workflow script omitted by condense. Retrieve with read_omitted_content if needed.",
+  },
+  SendMessage: {
+    kind: "omit",
+    fields: ["message"],
+    description: "Inter-agent message omitted by condense. Retrieve with read_omitted_content if needed.",
+  },
+  ReportFindings: {
+    kind: "omit",
+    fields: ["findings"],
+    description: "Report findings omitted by condense. Retrieve with read_omitted_content if needed.",
+  },
+  Bash: {
+    kind: "truncate",
+    field: "command",
+    keep: 512,
+    description: "Bash command truncated by condense. Retrieve the full command with read_omitted_content if needed.",
+  },
 };
 
-const DEFAULT_LIMIT = { words: 128, chars: 1024 };
-const AGENT_OUTPUT_LIMIT = { words: 512, chars: 4096 };
-const DEFAULT_OUTPUT_DESCRIPTION =
-  "Output omitted due to a compaction operation.";
-
-export function pruneTranscriptRow(
-  row: TranscriptRow,
-  context: ToolContext,
-): void {
-  if (!isRecord(row.message)) {
-    return;
-  }
-
-  const content = row.message["content"];
-  if (!Array.isArray(content)) {
-    return;
-  }
-
-  for (const block of content) {
-    if (!isRecord(block)) {
-      continue;
-    }
-
-    if (block["type"] === "tool_use") {
-      pruneToolInput(block, context);
-    }
-
-    if (block["type"] === "tool_result") {
-      pruneToolOutput(block, context);
-    }
-  }
-}
-
-function pruneToolInput(block: JsonRecord, context: ToolContext): void {
-  const toolName = typeof block["name"] === "string" ? block["name"] : null;
-  const toolUseId = typeof block["id"] === "string" ? block["id"] : null;
-  if (!toolName || !toolUseId) {
-    return;
-  }
-
-  context.toolNamesById.set(toolUseId, toolName);
-  if (!context.completedToolUseIds.has(toolUseId)) {
-    return;
-  }
-
+function toolInput(block: unknown): { name: string; input: JsonRecord } | null {
+  if (!isRecord(block) || block["type"] !== "tool_use") return null;
+  const name = typeof block["name"] === "string" ? block["name"] : null;
   const input = block["input"];
-  if (!isRecord(input) || toolName === "AskUserQuestion") {
-    return;
-  }
-
-  if (toolName === "Bash") {
-    truncateBashCommand(input, context.cache, context.sessionId);
-    return;
-  }
-
-  if (toolName === "Write") {
-    omitField(
-      input,
-      "content",
-      "File write contents omitted due to a compaction operation. If necessary, reread file to see current contents.",
-      context.cache,
-      context.sessionId,
-    );
-    return;
-  }
-
-  if (toolName === "Edit") {
-    omitCombinedFields(
-      input,
-      "old_string",
-      "new_string",
-      "File edit old_string and new_string omitted due to compaction operation. If necessary, reread file to see current contents.",
-      context.cache,
-      context.sessionId,
-    );
-    return;
-  }
-
-  if (toolName === "NotebookEdit") {
-    omitField(
-      input,
-      "new_source",
-      "Notebook edit source omitted due to compaction operation. If necessary, reread notebook to see current contents.",
-      context.cache,
-      context.sessionId,
-    );
-    return;
-  }
-
-  if (toolName === "Agent") {
-    omitField(
-      input,
-      "prompt",
-      "Agent prompt omitted due to compaction operation.",
-      context.cache,
-      context.sessionId,
-    );
-    return;
-  }
-
-  if (toolName === "Workflow") {
-    omitField(
-      input,
-      "script",
-      "Workflow script omitted due to compaction operation.",
-      context.cache,
-      context.sessionId,
-    );
-    return;
-  }
-
-  if (toolName === "SendMessage") {
-    omitField(
-      input,
-      "message",
-      "Inter-agent message omitted due to compaction operation.",
-      context.cache,
-      context.sessionId,
-    );
-    return;
-  }
-
-  if (toolName === "ReportFindings") {
-    omitField(
-      input,
-      "findings",
-      "Report findings omitted due to compaction operation.",
-      context.cache,
-      context.sessionId,
-    );
-  }
+  // AskUserQuestion inputs are small + interaction-critical; never prune.
+  if (!name || name === "AskUserQuestion" || !isRecord(input)) return null;
+  return { name, input };
 }
 
-function pruneToolOutput(block: JsonRecord, context: ToolContext): void {
-  if (block["is_error"] === true) {
-    return;
-  }
-
-  const toolUseId =
-    typeof block["tool_use_id"] === "string" ? block["tool_use_id"] : null;
-  const toolName = toolUseId ? context.toolNamesById.get(toolUseId) : null;
-  if (!toolName || toolName === "AskUserQuestion") {
-    return;
-  }
-
-  if (toolName === "Skill") {
-    block["content"] =
-      "Skill output omitted due to compaction operation. If necessary, recall the skill.";
-    return;
-  }
-
-  const content = stringifyContent(block["content"]);
-  if (!content) {
-    return;
-  }
-
-  if (toolName === "Read") {
-    const contentId = allocateOmission(
-      context.cache,
-      context.sessionId,
-      content,
-    );
-    block["content"] = outputOmissionNotice(
-      "Stale read contents omitted due to compaction operation. If necessary, reread to see current contents.",
-      content.length,
-      contentId,
-    );
-    return;
-  }
-
-  if (toolName === "NotebookEdit") {
-    const contentId = allocateOmission(
-      context.cache,
-      context.sessionId,
-      content,
-    );
-    block["content"] = outputOmissionNotice(
-      "Notebook edit output omitted due to compaction operation. If necessary, reread notebook to see current contents.",
-      content.length,
-      contentId,
-    );
-    return;
-  }
-
-  const limit =
-    toolName === "Agent" || toolName === "TaskOutput"
-      ? AGENT_OUTPUT_LIMIT
-      : DEFAULT_LIMIT;
-  if (!exceeds(content, limit)) {
-    return;
-  }
-
-  const contentId = allocateOmission(context.cache, context.sessionId, content);
-  block["content"] = outputOmissionNotice(
-    DEFAULT_OUTPUT_DESCRIPTION,
-    content.length,
-    contentId,
-  );
+function specSize(spec: InputSpec, input: JsonRecord): number {
+  const fields = spec.kind === "omit" ? spec.fields : [spec.field];
+  return fields.reduce((n, f) => n + stringifyContent(input[f]).length, 0);
 }
 
-function omitField(
-  input: JsonRecord,
-  field: string,
-  description: string,
+// Prunable big-input size of a tool_use block, or 0 if it is not a candidate
+// (unknown tool, no big field, or under the floor). Shared by analyze + build
+// so both agree on exactly which inputs are rankable.
+export function bigInputSize(block: unknown): number {
+  const ti = toolInput(block);
+  if (!ti) return 0;
+  const spec = INPUT_SPECS[ti.name];
+  if (!spec) return 0;
+  const size = specSize(spec, ti.input);
+  return size >= INPUT_FLOOR_CHARS ? size : 0;
+}
+
+// Force-prune a tool_use block's big input to a retrievable Content-ID. Returns
+// the pruned size, or 0 if the block was not a prunable candidate. No threshold
+// governs the decision here — the caller already ranked this input for removal.
+export function pruneToolInput(
+  block: JsonRecord,
   cache: OmissionCache,
   sessionId: string,
-): void {
-  const content = stringifyContent(input[field]);
-  if (!content || !exceeds(content, DEFAULT_LIMIT)) {
-    return;
+): number {
+  const ti = toolInput(block);
+  if (!ti) return 0;
+  const spec = INPUT_SPECS[ti.name];
+  if (!spec) return 0;
+  const size = specSize(spec, ti.input);
+  if (size < INPUT_FLOOR_CHARS) return 0;
+
+  if (spec.kind === "truncate") {
+    const command = stringifyContent(ti.input[spec.field]);
+    const contentId = allocateOmission(cache, sessionId, command);
+    ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
+    ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(
+      spec.description,
+      command.length,
+      contentId,
+    );
+    return size;
   }
 
-  const contentId = allocateOmission(cache, sessionId, content);
-  input[field] = "[Omitted]";
-  input[`${field}_omission_notice`] = inputOmissionNotice(
-    description,
-    content.length,
-    contentId,
-  );
-}
-
-function omitCombinedFields(
-  input: JsonRecord,
-  firstField: string,
-  secondField: string,
-  description: string,
-  cache: OmissionCache,
-  sessionId: string,
-): void {
-  const first = stringifyContent(input[firstField]);
-  const second = stringifyContent(input[secondField]);
-  const combined = `${first}\n${second}`;
-  if (!exceeds(combined, DEFAULT_LIMIT)) {
-    return;
-  }
-
+  const combined = spec.fields.map((f) => stringifyContent(ti.input[f])).join("\n");
   const contentId = allocateOmission(cache, sessionId, combined);
-  input[firstField] = "[Omitted]";
-  input[secondField] = "[Omitted]";
-  input[`${firstField}_${secondField}_omission_notice`] = inputOmissionNotice(
-    description,
+  for (const f of spec.fields) ti.input[f] = "[Omitted by condense]";
+  ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(
+    spec.description,
     combined.length,
     contentId,
   );
-}
-
-function truncateBashCommand(
-  input: JsonRecord,
-  cache: OmissionCache,
-  sessionId: string,
-): void {
-  const command = stringifyContent(input["command"]);
-  if (command.length <= 1024) {
-    return;
-  }
-
-  const contentId = allocateOmission(cache, sessionId, command);
-  input["command"] = `${command.slice(0, 512)}\n[REST OF COMMAND TRUNCATED]`;
-  input["command_omission_notice"] = inputOmissionNotice(
-    "Bash command truncated due to compaction operation.",
-    command.length,
-    contentId,
-  );
+  return size;
 }
 
 function stringifyContent(content: unknown): string {
-  if (typeof content === "string") {
-    return content;
-  }
-
-  if (content === undefined || content === null) {
-    return "";
-  }
-
+  if (typeof content === "string") return content;
+  if (content === undefined || content === null) return "";
   return JSON.stringify(content);
-}
-
-function exceeds(
-  text: string,
-  limit: { words: number; chars: number },
-): boolean {
-  return wordCount(text) > limit.words || text.length > limit.chars;
-}
-
-function wordCount(text: string): number {
-  const trimmed = text.trim();
-  return trimmed ? trimmed.split(/\s+/).length : 0;
 }

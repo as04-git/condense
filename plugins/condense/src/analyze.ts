@@ -15,6 +15,7 @@
 // meaningful signals for ranking; the model supplies relevance from its own
 // in-context (decrypted) reasoning.
 
+import { bigInputSize } from "./prune";
 import {
   buildAssistantTurns,
   isRecord,
@@ -44,6 +45,13 @@ type ThinkingStat = {
   uuid: string; // source row uuid (unambiguous across multiple assistant rows in a turn)
   blockIndex: number;
   signatureSize: number;
+};
+
+type ToolInputStat = {
+  toolUseId: string | null;
+  turn: number;
+  toolName: string;
+  size: number;
 };
 
 type TurnStat = {
@@ -140,6 +148,7 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
 
   const turnStats: TurnStat[] = [];
   const toolOutputs: ToolOutputStat[] = [];
+  const toolInputs: ToolInputStat[] = [];
   const thinkingBlocks: ThinkingStat[] = [];
   const typeTotals: Record<BlockKind, number> = {
     prose: 0,
@@ -207,6 +216,15 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
             st.toolInput += blockText(b);
             st.toolCalls += 1;
             typeTotals.tool_input += blockText(b);
+            const bigIn = bigInputSize(b);
+            if (bigIn > 0) {
+              toolInputs.push({
+                toolUseId: typeof b["id"] === "string" ? b["id"] : null,
+                turn: ti,
+                toolName: typeof b["name"] === "string" ? b["name"] : "?",
+                size: bigIn,
+              });
+            }
           } else {
             st.prose += blockText(b);
             typeTotals.prose += blockText(b);
@@ -252,6 +270,9 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
   const rankableToolOut = toolOutputs
     .filter((t) => t.turn < n - keepTurns)
     .reduce((a, t) => a + t.size, 0);
+  const rankableToolIn = toolInputs
+    .filter((t) => t.turn < n - keepTurns)
+    .reduce((a, t) => a + t.size, 0);
   const rankableThinkingSig = thinkingBlocks
     .filter((t) => t.turn < n - keepTurns)
     .reduce((a, t) => a + t.signatureSize, 0);
@@ -271,10 +292,11 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
       ]),
     ),
     projectedReclaim: {
-      toolOutputs_drop_or_ranked_chars: rankableToolOut,
-      thinking_signatures_drop_chars: rankableThinkingSig,
+      toolOutputs_chars: rankableToolOut,
+      toolInputs_chars: rankableToolIn,
+      thinking_signatures_chars: rankableThinkingSig,
       note:
-        "tool-output reclaim is lossless (retrievable Content-IDs). thinking reclaim shown is SIGNATURE bytes only; true live-context reclaim is larger (decrypted reasoning). keepTurns region excluded.",
+        "tool-I/O reclaim (inputs + outputs) is lossless (retrievable Content-IDs). thinking reclaim shown is SIGNATURE bytes only; true live-context reclaim is larger (decrypted reasoning). keepTurns region excluded.",
     },
     perTurn: turnStats.map((t) => ({
       turn: t.turn,
@@ -295,8 +317,19 @@ function report(rows: TranscriptRow[], keepTurns: number): void {
         toolUseId: t.toolUseId,
         turn: t.turn,
         tool: t.toolName,
+        side: "output",
         size: t.size,
         errored: t.errored,
+      })),
+    rankableToolInputs: toolInputs
+      .filter((t) => t.turn < n - keepTurns)
+      .sort((a, b) => b.size - a.size)
+      .map((t) => ({
+        toolUseId: t.toolUseId,
+        turn: t.turn,
+        tool: t.toolName,
+        side: "input",
+        size: t.size,
       })),
     rankableThinking: thinkingBlocks
       .filter((t) => t.turn < n - keepTurns)

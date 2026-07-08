@@ -262,6 +262,12 @@ function compareByTimestamp(a: TranscriptRow, b: TranscriptRow): number {
 }
 
 function isCompactBoundary(row: TranscriptRow): boolean {
+  const condense = row["condense"];
+  if (isRecord(condense) && condense["boundary"] === true) {
+    return true;
+  }
+  // Also honor a legacy magic-compact boundary, in case a previously
+  // magic-compacted session is later condensed.
   const magicCompact = row["magicCompact"];
   return isRecord(magicCompact) && magicCompact["boundary"] === true;
 }
