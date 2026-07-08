@@ -18,7 +18,7 @@ server.setRequestHandler(ListToolsRequestSchema, () => ({
     {
       name: toolName,
       description:
-        "Read original tool input or output content omitted by Magic Compact.",
+        "Retrieve the original content (tool input/output, or injected/skill dump) that /condense omitted, by its Content-ID.",
       inputSchema: {
         type: "object",
         properties: {
