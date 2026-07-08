@@ -43,6 +43,8 @@ Modes: `keep-all` (keep everything of that class), `keep-ranked` (keep only the 
 
 **Optional `title`** — the compacted session is titled `🗜 condense #N — <desc>` (N auto-increments across repeated condensing). By default `<desc>` is derived from the session's first prompt; set `"title"` in the ranking to give a better one-line description of what the session is about (the `#N` prefix is always kept). Do this when the first prompt is a poor descriptor of the actual work.
 
+The build step automatically (a) **strips the `/condense` operation's own turn** (this skill dump + the analyze call) so the compacted session ends at real work, not machinery, and (b) **appends one deterministic closing marker** stating exactly what it pruned/kept and how to recover it. You don't rank or specify either — they come from the build's own tallies. On the resumed side, that marker is the last thing you'll see: trust it over memory for what's inline vs pruned.
+
 ## Step 4 — Report
 
 Concisely: reclaim achieved (source vs projected), what was pruned vs kept (from `stats`), and **`/resume <sessionId>`** to enter the compacted session. Note: the original session is untouched; pruned attachments are recoverable via `read_omitted_content` (Content-ID) or by re-invoking the named skill.

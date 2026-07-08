@@ -251,6 +251,30 @@ function normalizeRanking(value: unknown): Ranking {
   };
 }
 
+// A turn is the /condense operation's own turn if it carries the condense skill
+// dump or a call to the condense CLI — used to strip it from the compacted output.
+function isCondenseOperationTurn(turn: Turn): boolean {
+  for (const row of turn.rows) {
+    if (!isRecord(row.message)) continue;
+    const content = row.message["content"];
+    const text = Array.isArray(content)
+      ? content
+          .filter((b) => isRecord(b) && b["type"] === "text")
+          .map((b) => String((b as JsonRecord)["text"] ?? ""))
+          .join("\n")
+      : typeof content === "string"
+        ? content
+        : "";
+    if (
+      /Base directory for this skill:\s*\S*\/skills\/condense\b/.test(text) ||
+      /condense\/src\/condense\.ts\s+(analyze|build)\b/.test(text)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function createPlan(rows: TranscriptRow[], keepTurns: number): Plan {
   const baseRow = rows.find(
     (row) => row.type === "user" || row.type === "assistant",
@@ -259,7 +283,13 @@ function createPlan(rows: TranscriptRow[], keepTurns: number): Plan {
     throw new Error("Transcript does not contain compactable conversation rows.");
   }
 
-  const turns = buildAssistantTurns(rows);
+  let turns = buildAssistantTurns(rows);
+  // Strip the trailing /condense operation's own turn(s) — the skill dump +
+  // analyze call — so the compacted session ends at the last REAL work turn
+  // instead of mid-machinery (which primed the resumed model to re-condense).
+  while (turns.length > 0 && isCondenseOperationTurn(turns[turns.length - 1])) {
+    turns = turns.slice(0, -1);
+  }
   // Everything after a previous condense boundary is fair game; the boundary
   // itself is a meta row that buildAssistantTurns won't include in a turn.
   const boundaryStart =
@@ -304,6 +334,7 @@ async function buildCompactedRows(
     injectedPrunedToContentId: 0,
     injectedSkillNoted: 0,
     emptyAssistantRowsDropped: 0,
+    skillsNoted: [] as string[],
   };
 
   const lastOriginalRow = sourceTurns(plan)
@@ -377,8 +408,69 @@ async function buildCompactedRows(
     parentUuid = copyTurnVerbatim(turn, rows, copiedUuids, sessionId, timestamp, parentUuid);
   }
 
+  // Deterministic closing marker — the final context the resumed model sees.
+  // Purely factual (built from stats), so the model can't confabulate what is
+  // present vs pruned. isMeta + string content => excluded from future turns
+  // (auto-replaced next condense) and never re-detected as an injected attachment.
+  const sourceSessionId =
+    typeof plan.baseRow.sessionId === "string" ? plan.baseRow.sessionId : "unknown";
+  rows.push({
+    ...copySessionFields(plan.baseRow, sessionId, timestamp),
+    type: "user",
+    uuid: randomUUID(),
+    parentUuid,
+    isMeta: true,
+    condenseMarker: true,
+    message: {
+      id: `msg_${randomUUID()}`,
+      role: "user",
+      content: condenseMarkerText(sourceSessionId, generation, ranking.keepTurns, stats),
+    },
+  });
+
   await saveOmissionCache(sessionId, omissionCache);
   return { compactedRows: rows, stats };
+}
+
+function condenseMarkerText(
+  sourceSessionId: string,
+  generation: number,
+  keepTurns: number,
+  stats: {
+    thinkingKept: number;
+    thinkingDropped: number;
+    toolInputsKept: number;
+    toolInputsPruned: number;
+    toolOutputsKept: number;
+    toolOutputsPruned: number;
+    injectedPrunedToContentId: number;
+    injectedSkillNoted: number;
+    skillsNoted: string[];
+  },
+): string {
+  const skills = stats.skillsNoted.length ? ` [${stats.skillsNoted.join(", ")}]` : "";
+  const lines = [
+    `🗜 CONDENSED SESSION (generation ${generation}) — you are now inside the condensed result.`,
+    `Continue the work below; do NOT re-condense unless the user asks. This marker is deterministic (built from the build step's own tallies) — trust it over memory for what is present vs pruned.`,
+    `Pruned, all recoverable:`,
+    `  • ${stats.toolOutputsPruned} tool-output(s) + ${stats.toolInputsPruned} tool-input(s) — placeholder inline; retrieve exact bytes with read_omitted_content <Content-ID shown at each placeholder>.`,
+  ];
+  if (stats.injectedSkillNoted > 0) {
+    lines.push(
+      `  • ${stats.injectedSkillNoted} skill dump(s)${skills} — re-invoke the skill to reload (a Content-ID fallback is also on each note).`,
+    );
+  }
+  if (stats.injectedPrunedToContentId > 0) {
+    lines.push(
+      `  • ${stats.injectedPrunedToContentId} other injection(s) — retrieve with read_omitted_content <Content-ID at each placeholder>.`,
+    );
+  }
+  lines.push(
+    `  • ${stats.thinkingDropped} thinking block(s) dropped — prior reasoning; NOT recoverable, but all prose is intact.`,
+    `Kept inline: ${stats.toolOutputsKept} tool-output(s), ${stats.toolInputsKept} tool-input(s), ${stats.thinkingKept} thinking block(s). All prose (your text + user messages) and the last ${keepTurns} turn(s) are fully untouched.`,
+    `Condensed from parent session ${sourceSessionId} (unchanged on disk — /resume it to see everything un-pruned).`,
+  );
+  return lines.join("\n");
 }
 
 // --- content handlers -------------------------------------------------------
@@ -393,6 +485,7 @@ function applyInjectedMode(
     injectedKept: number;
     injectedPrunedToContentId: number;
     injectedSkillNoted: number;
+    skillsNoted: string[];
   },
 ): void {
   const inj = injectedInfo(row);
@@ -425,6 +518,7 @@ function applyInjectedMode(
       + `If you need it again, re-invoke the skill (type /${inj.skill}, or use the Skill tool with skill "${inj.skill}"); `
       + `or retrieve the exact bytes with read_omitted_content (Content ID: ${contentId}).]`;
     stats.injectedSkillNoted += 1;
+    if (!stats.skillsNoted.includes(inj.skill)) stats.skillsNoted.push(inj.skill);
   } else {
     notice = outputOmissionNotice("Injected content omitted by condense", inj.size, contentId);
     stats.injectedPrunedToContentId += 1;
