@@ -113,20 +113,41 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
     // and forkedFrom repointed to the TRUE immediate parent (the session we
     // condensed) so lineage reflects the previous generation. Only overwrite
     // slug/session_id where they already exist so we never alter a row's shape.
+    // Enforce a strictly linear parentUuid chain over the content rows. The
+    // source active chain can carry MULTIPLE leaves (e.g. user-interrupt
+    // artifacts leave dead-end assistant rows) which survive re-chaining as
+    // branches; CC's three leaf-resolution strategies can then disagree, and the
+    // /resume picker builds one entry per leaf. A condensed session is a single
+    // linear artifact, so re-chain each content row to its predecessor in file
+    // order — exactly one leaf (the marker), boundary as root.
+    let prevUuid: string | null = null;
+    for (const r of compactedRows) {
+      if (!isRecord(r) || typeof r["uuid"] !== "string") continue;
+      r["parentUuid"] = prevUuid;
+      prevUuid = r["uuid"] as string;
+    }
+
     const cloneSlug = `condense-${randomUUID().slice(0, 8)}`;
     const parentSessionId = plan.baseRow.sessionId;
     const allRows = [...titledMetadata, ...compactedRows];
-    for (const r of allRows) {
-      if (!isRecord(r)) continue;
+    // Strictly-increasing timestamps in file order: CC's leaf resolution breaks
+    // ties by max timestamp (sessionStorage.ts:2055), so stamping one identical
+    // timestamp on every row (as we did) removes the ordering signal and can let
+    // the preview and the model anchor to different leaves. Incrementing per row
+    // guarantees the last row (the marker) is the unambiguous leaf.
+    const baseMs = Date.now();
+    allRows.forEach((r, i) => {
+      if (!isRecord(r)) return;
       // Load-bearing invariant (source: metadata resolves by
       // map.get(leafMessage.sessionId)): EVERY row's sessionId must equal the
       // new id or the title silently vanishes. copyRow set it on message rows;
       // enforce it uniformly here as a backstop.
       r["sessionId"] = destination.sessionId;
+      r["timestamp"] = new Date(baseMs + i).toISOString();
       if ("slug" in r) r["slug"] = cloneSlug;
       if ("session_id" in r) r["session_id"] = destination.sessionId;
       if ("forkedFrom" in r) r["forkedFrom"] = { sessionId: parentSessionId };
-    }
+    });
     await writeTranscriptEntries(destination.transcriptPath, allRows);
 
     return {
@@ -151,11 +172,9 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
 // so they don't compound across generations.
 const SINGLETON_META = new Set([
   "mode",
-  "last-prompt",
   "permission-mode",
   "agent-color",
   "agent-setting",
-  "worktree-state",
   "pr-link",
   "tag",
 ]);
@@ -399,7 +418,10 @@ async function buildCompactedRows(
       role: "user",
       content: POST_COMPACTION_NOTICE,
     },
-    logicalParentUuid: lastOriginalRow.uuid,
+    // null, not lastOriginalRow.uuid: that referenced a pre-clone uuid that no
+    // longer exists in this file. Source confirms logicalParentUuid is never
+    // walked on load (inert), but a dangling ref is untidy — keep it clean.
+    logicalParentUuid: null,
     condense: { boundary: true, generation },
   });
   let parentUuid: string | null = boundaryUuid;

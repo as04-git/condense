@@ -342,13 +342,18 @@ function rewriteSessionMetadata(
 const PRESERVED_METADATA_TYPES = new Set([
   "custom-title",
   "ai-title",
-  "last-prompt",
+  // "last-prompt" deliberately NOT preserved: the /resume picker preview reads
+  // this field as its headline (sessionStorage.ts:4760), so carrying the
+  // parent's last prompt (e.g. "/branch") makes the picker show stale text that
+  // disagrees with the actually-loaded condensed chain. Let CC regenerate it on
+  // the resumed session's first real prompt.
   "tag",
   "agent-name",
   "agent-color",
   "agent-setting",
   "mode",
-  "worktree-state",
+  // "worktree-state" NOT preserved: a clone must not think it's in the parent's
+  // worktree. Both /branch and --fork-session strip it (sessionRestore.ts:470).
   "pr-link",
   "task-summary",
   "permission-mode",
