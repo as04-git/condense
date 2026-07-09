@@ -11,7 +11,7 @@
 // Tool OUTPUTS are handled entirely in build.ts (applyToolOutputMode); there is
 // no output pruning here and no threshold governs any keep/drop decision.
 
-import { allocateOmission, inputOmissionNotice } from "./omission";
+import { allocateOmission, inputOmissionNotice, noticeOverhead } from "./omission";
 import { isRecord, type JsonRecord } from "./transcript";
 
 type OmissionCache = Parameters<typeof allocateOmission>[0];
@@ -42,60 +42,56 @@ const INPUT_SPECS: Record<string, InputSpec> = {
   Write: {
     kind: "omit",
     fields: ["content"],
-    descriptionFn: (i) =>
-      `File write contents omitted by condense${filePath(i)}. Reread the file for current contents, or retrieve the exact bytes with read_omitted_content.`,
+    descriptionFn: (i) => `Write input omitted${filePath(i)}; reread file`,
   },
   Edit: {
     kind: "omit",
     fields: ["old_string", "new_string"],
-    descriptionFn: (i) =>
-      `File edit strings omitted by condense${filePath(i)}. Reread the file for current contents, or retrieve with read_omitted_content.`,
+    descriptionFn: (i) => `Edit strings omitted${filePath(i)}; reread file`,
   },
   NotebookEdit: {
     kind: "omit",
     fields: ["new_source"],
-    descriptionFn: (i) =>
-      `Notebook edit source omitted by condense${filePath(i)}. Reread the notebook, or retrieve with read_omitted_content.`,
+    descriptionFn: (i) => `NotebookEdit source omitted${filePath(i)}; reread notebook`,
   },
   Agent: {
     kind: "omit",
     fields: ["prompt"],
     descriptionFn: (i) => {
-      const desc = typeof i["description"] === "string" ? ` "${i["description"]}"` : "";
-      const head = firstLine(i["prompt"]);
-      return `Agent prompt${desc} omitted by condense.${head ? ` Began: "${head}"` : ""} Retrieve with read_omitted_content if needed.`;
+      const d = typeof i["description"] === "string" ? ` "${i["description"]}"` : "";
+      const h = firstLine(i["prompt"]);
+      return `Agent prompt${d} omitted${h ? `: "${h}"` : ""}`;
     },
   },
   Workflow: {
     kind: "omit",
     fields: ["script"],
     descriptionFn: (i) => {
-      const name = typeof i["name"] === "string" ? ` "${i["name"]}"` : "";
-      return `Workflow script${name} omitted by condense. Retrieve with read_omitted_content if needed.`;
+      const n = typeof i["name"] === "string" ? ` "${i["name"]}"` : "";
+      return `Workflow script${n} omitted`;
     },
   },
   SendMessage: {
     kind: "omit",
     fields: ["message"],
     descriptionFn: (i) => {
-      const to = typeof i["to"] === "string" ? ` (to: ${i["to"]})` : "";
-      return `Inter-agent message${to} omitted by condense. Retrieve with read_omitted_content if needed.`;
+      const to = typeof i["to"] === "string" ? ` to:${i["to"]}` : "";
+      return `SendMessage${to} omitted`;
     },
   },
   ReportFindings: {
     kind: "omit",
     fields: ["findings"],
     descriptionFn: (i) => {
-      const n = Array.isArray(i["findings"]) ? ` (${i["findings"].length} findings)` : "";
-      return `Report findings${n} omitted by condense. Retrieve with read_omitted_content if needed.`;
+      const n = Array.isArray(i["findings"]) ? `(${i["findings"].length})` : "";
+      return `ReportFindings${n} omitted`;
     },
   },
   Bash: {
     kind: "truncate",
     field: "command",
     keep: 512,
-    descriptionFn: () =>
-      "Bash command truncated by condense. Retrieve the full command with read_omitted_content if needed.",
+    descriptionFn: () => "Bash cmd truncated",
   },
 };
 
@@ -139,13 +135,15 @@ export function pruneToolInput(
   if (!spec) return 0;
   const size = specSize(spec, ti.input);
   if (size < INPUT_FLOOR_CHARS) return 0;
+  const desc = spec.descriptionFn(ti.input);
+  if (noticeOverhead(desc) >= size) return 0;
 
   if (spec.kind === "truncate") {
     const command = stringifyContent(ti.input[spec.field]);
     const contentId = allocateOmission(cache, sessionId, command);
     ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
     ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(
-      spec.descriptionFn(ti.input),
+      desc,
       command.length,
       contentId,
     );
@@ -156,7 +154,7 @@ export function pruneToolInput(
   const contentId = allocateOmission(cache, sessionId, combined);
   for (const f of spec.fields) ti.input[f] = "[Omitted by condense]";
   ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(
-    spec.descriptionFn(ti.input),
+    desc,
     combined.length,
     contentId,
   );
@@ -173,7 +171,7 @@ function stringifyContent(content: unknown): string {
 // notice (that would nest notice→notice→original and force multi-hop retrieval);
 // the existing notice already points at the original Content-ID or skill.
 export function isCondenseNotice(text: string): boolean {
-  return text.includes("omitted by condense");
+  return text.includes("omitted by condense") || text.includes("[condense:");
 }
 
 // True if this tool_use block's input was already pruned by an earlier condense

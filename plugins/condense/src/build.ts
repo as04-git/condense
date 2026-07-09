@@ -24,6 +24,7 @@ import { forkForCondense } from "./fork";
 import {
   allocateOmission,
   loadOmissionCache,
+  noticeOverhead,
   outputOmissionNotice,
   saveOmissionCache,
 } from "./omission";
@@ -525,14 +526,12 @@ function applyInjectedMode(
   let notice: string;
   if (inj.skill) {
     notice =
-      `[Skill "${inj.skill}" output (${inj.size} chars) was omitted by condense to reclaim context. `
-      + `This was NOT the user's message — it is skill-injected reference material. `
-      + `If you need it again, re-invoke the skill (type /${inj.skill}, or use the Skill tool with skill "${inj.skill}"); `
-      + `or retrieve the exact bytes with read_omitted_content (Content ID: ${contentId}).]`;
+      `[Skill "${inj.skill}" output (${inj.size} chars) omitted by condense. `
+      + `Re-invoke: type /${inj.skill} or Skill tool. Fallback retrieve: ${contentId}]`;
     stats.injectedSkillNoted += 1;
     if (!stats.skillsNoted.includes(inj.skill)) stats.skillsNoted.push(inj.skill);
   } else {
-    notice = outputOmissionNotice("Injected content omitted by condense", inj.size, contentId);
+    notice = outputOmissionNotice("injected content omitted", inj.size, contentId);
     stats.injectedPrunedToContentId += 1;
   }
   row.message["content"] = [{ type: "text", text: notice }];
@@ -638,13 +637,14 @@ function applyToolOutputMode(
       stats.toolOutputsKept += 1;
       continue;
     }
-    const contentId = allocateOmission(ctx.cache, ctx.sessionId, text);
     const toolName = toolUseId ? ctx.toolNames.get(toolUseId) ?? "?" : "?";
-    block["content"] = outputOmissionNotice(
-      smartOutputDescription(toolName, text, toolUseId ? ctx.toolInputs.get(toolUseId) : undefined),
-      text.length,
-      contentId,
-    );
+    const desc = smartOutputDescription(toolName, text, toolUseId ? ctx.toolInputs.get(toolUseId) : undefined);
+    if (noticeOverhead(desc) >= text.length) {
+      stats.toolOutputsKept += 1;
+      continue;
+    }
+    const contentId = allocateOmission(ctx.cache, ctx.sessionId, text);
+    block["content"] = outputOmissionNotice(desc, text.length, contentId);
     stats.toolOutputsPruned += 1;
   }
 }
@@ -676,46 +676,35 @@ function smartOutputDescription(
   text: string,
   toolInput?: JsonRecord,
 ): string {
-  // Task-notification (agent result) — the most valuable type; extract agent
-  // description + first line of result.
+  // Task-notification (agent result).
   const taskMatch = text.match(/<summary>\s*(?:Agent\s+)?"([^"]+)"/);
-  const resultMatch = text.match(/<result>\s*([\s\S]{1,120})/);
+  const resultMatch = text.match(/<result>\s*([\s\S]{1,80})/);
   if (taskMatch || resultMatch) {
-    const desc = taskMatch ? ` "${taskMatch[1]}"` : "";
-    const preview = resultMatch ? ` Result began: "${previewLine(resultMatch[1])}"` : "";
-    return `Agent result${desc} omitted by condense.${preview} Retrieve with read_omitted_content.`;
+    const d = taskMatch ? ` "${taskMatch[1]}"` : "";
+    const p = resultMatch ? `: "${previewLine(resultMatch[1])}"` : "";
+    return `agent-result${d} omitted${p}`;
   }
 
-  // File operations — show the file path.
+  // File ops — show path.
   if (toolInput && (toolName === "Read" || toolName === "Edit" || toolName === "Write" || toolName === "NotebookEdit")) {
-    const path = toolInput["file_path"] ?? toolInput["notebook_path"] ?? toolInput["path"];
-    if (typeof path === "string") {
-      return `${toolName} output omitted by condense (${path}). Reread the file, or retrieve with read_omitted_content.`;
-    }
+    const path = toolInput["file_path"] ?? toolInput["notebook_path"];
+    if (typeof path === "string") return `${toolName} output omitted (${path}); reread file`;
   }
 
-  // Bash — show first line of command from input if available.
+  // Bash — show command head.
   if (toolName === "Bash" && toolInput && typeof toolInput["command"] === "string") {
-    const cmd = previewLine(toolInput["command"], 60);
-    return `Bash output omitted by condense (${cmd}). Re-run the command, or retrieve with read_omitted_content.`;
+    return `Bash output omitted (${previewLine(toolInput["command"], 50)})`;
   }
 
-  // WebFetch / WebSearch — show the URL/query.
-  if (toolName === "WebFetch" && toolInput && typeof toolInput["url"] === "string") {
-    return `WebFetch output omitted by condense (${toolInput["url"]}). Re-fetch, or retrieve with read_omitted_content.`;
-  }
-  if (toolName === "WebSearch" && toolInput && typeof toolInput["query"] === "string") {
-    return `WebSearch output omitted by condense (query: "${toolInput["query"]}"). Re-search, or retrieve with read_omitted_content.`;
-  }
+  // WebFetch/WebSearch.
+  if (toolName === "WebFetch" && toolInput && typeof toolInput["url"] === "string")
+    return `WebFetch omitted (${toolInput["url"]})`;
+  if (toolName === "WebSearch" && toolInput && typeof toolInput["query"] === "string")
+    return `WebSearch omitted ("${toolInput["query"]}")`;
 
-  // Grep / find — show the pattern/path.
-  if ((toolName === "Grep" || toolName === "Bash") && toolInput && typeof toolInput["pattern"] === "string") {
-    return `${toolName} output omitted by condense (pattern: "${toolInput["pattern"]}"). Re-run, or retrieve with read_omitted_content.`;
-  }
-
-  // Generic fallback — at least name the tool + a content preview.
-  const head = previewLine(text);
-  return `${toolName} output omitted by condense.${head ? ` Began: "${head}"` : ""} Retrieve with read_omitted_content if needed.`;
+  // Fallback — tool name + content preview.
+  const head = previewLine(text, 50);
+  return `${toolName} output omitted${head ? `: "${head}"` : ""}`;
 }
 
 function stringifyContent(content: unknown): string {

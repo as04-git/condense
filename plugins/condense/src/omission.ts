@@ -70,12 +70,7 @@ export function inputOmissionNotice(
   length: number,
   contentId: string,
 ): string {
-  return `<tool-input-omission-notice>
-${description}
-
-Omitted Length: ${length} characters
-Content ID: ${contentId}
-</tool-input-omission-notice>`;
+  return `[condense: ${description} (${length}ch) — retrieve: ${contentId}]`;
 }
 
 export function outputOmissionNotice(
@@ -83,12 +78,12 @@ export function outputOmissionNotice(
   length: number,
   contentId: string,
 ): string {
-  return `<tool-output-omission-notice>
-${description}
+  return `[condense: ${description} (${length}ch) — retrieve: ${contentId}]`;
+}
 
-Output Length: ${length} characters
-Content ID: ${contentId}
-</tool-output-omission-notice>`;
+export function noticeOverhead(description: string): number {
+  // "[condense: " + description + " (12345ch) — retrieve: xxxxxxxxxxxx:omitted-999]"
+  return 12 + description.length + 30 + 30;
 }
 
 async function findSessionIdBySuffix(suffix: string): Promise<string | null> {
