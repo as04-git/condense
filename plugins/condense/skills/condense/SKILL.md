@@ -24,11 +24,22 @@ CLI: `bun ~/.claude/condense/plugins/condense/src/condense.ts <subcommand>`. It 
 ```bash
 bun ~/.claude/condense/plugins/condense/src/condense.ts analyze <keepTurns>
 ```
-(default keepTurns = 1). Read the JSON: `summary`, `typeBreakdown`, `projectedReclaim`, `perTurn`, `rankableAttachments` (each has a `ref`, `kind`, `turn`, `size`, and an **anchor `head` snippet** so you identify it by content), and `rankableThinking`.
+(default keepTurns = 1). Read the JSON: `summary`, `typeBreakdown`, `projectedReclaim`, `tierSummary`, `perTurn`, `rankableAttachments`, and `rankableThinking`.
+
+`rankableAttachments` is **pre-sorted prune-first** and each carries decision-support signals:
+- `ref`, `kind`, `turn`, `size`, `head` (anchor snippet — identify it by content).
+- `age` — turns from the end.
+- `superseded` / `supersededBy` — `true` when a LATER op acted on the same file/command (e.g. `"Edit@turn41"`), so this is a stale snapshot; the current version is elsewhere.
+- `tier` — `prime-prune` (superseded stale copy, or a re-invokable skill dump), `review` (live + sizable — your judgment call), or `likely-keep` (small; cheap to leave inline).
 
 ## Step 2 — Rank, biased HARD toward pruning
 
-**Reclaim is the goal. Default to dropping.** Keep an attachment **only if you can name a concrete reason you will need its exact content to continue the work** — e.g. a file you are actively mid-edit on, a spec you keep re-reading. If you cannot name that reason, prune it. Everything is recoverable (`read_omitted_content`, re-run the tool, re-invoke the skill), so err aggressively toward shedding. A huge stale skill dump or an old file read is exactly what should go. Do **not** keep something merely because it is large or recent.
+**Reclaim is the goal. Default to dropping.** The tiers make this cheap — but they *advise*, they don't decide. Your job is to catch what they get wrong:
+- **prime-prune** → prune, essentially always (stale/superseded or re-invokable). Only rescue one if you can name a concrete reason you need its exact bytes inline.
+- **review** → the real judgment. Keep only what you can name a reason for (a file you are mid-edit on, a spec you keep re-reading). Otherwise prune — this tier is the biggest reclaim.
+- **likely-keep** → leave inline; not worth the retrieval round-trip. But prune a small item too if it's clearly dead.
+
+Everything is recoverable (`read_omitted_content`, re-run the tool, re-invoke the skill), so err aggressively toward shedding. Do **not** keep something merely because it is large or recent — check `superseded` and whether you can name a use.
 
 - **Attachments** (`keep-ranked`): from `rankableAttachments`, pick the *minimal* set of `ref`s to KEEP. Use the `head` snippet to recognize each. Copy kept refs verbatim into `keepAttachments`. Everything not listed is pruned (tool I/O → Content-ID; skill → re-invoke note).
 - **Thinking** (`keep-ranked`): from `rankableThinking` (keyed by `turn`/`uuid`/`blockIndex`), keep reasoning only from turns whose thinking is still load-bearing to continue — cross-reference `perTurn` prompts and your own memory of what you reasoned about. Drop the rest. Put kept blocks as `{uuid, blockIndex}` in `keepThinking`.

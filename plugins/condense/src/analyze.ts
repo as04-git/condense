@@ -30,6 +30,20 @@ export type Attachment = {
   skill?: string;
 };
 
+// Prune-priority tier (soft hint; the model decides). prime-prune = safe to shed
+// almost always (superseded stale copy, or a re-invokable skill dump); review =
+// live + sizable, the model's judgment call; likely-keep = small/cheap to keep.
+type Tier = "prime-prune" | "review" | "likely-keep";
+
+// An operation on a "target" (a file path or a bash command). Earlier ops on the
+// same target are SUPERSEDED by later ones — the later op is the current reality,
+// so the earlier snapshot is the safest thing to prune.
+type Op = { id: string; turn: number; seq: number; name: string; target: string };
+
+// Below this size an attachment isn't worth pruning (the retrieval round-trip
+// costs more than the reclaim), so it defaults to likely-keep.
+const KEEP_SIZE = 1000;
+
 type ThinkingStat = {
   turn: number;
   uuid: string;
@@ -100,6 +114,48 @@ function signatureSize(block: unknown): number {
   return isRecord(block) ? String(block["signature"] ?? "").length : 0;
 }
 
+// The "target" a tool_use acts on, for supersession: a file path (Read/Edit/
+// Write/NotebookEdit) or a bash command string. null = not supersession-eligible
+// (no shared target, e.g. Grep/Glob/Task). Exact-match by design — a near-repeat
+// (git status vs git status -s) is a DIFFERENT target, so we never falsely flag
+// something live as superseded.
+function toolTarget(name: string, input: unknown): string | null {
+  if (!isRecord(input)) return null;
+  const path = input["file_path"] ?? input["notebook_path"];
+  if (
+    (name === "Read" || name === "Edit" || name === "Write" || name === "NotebookEdit")
+    && typeof path === "string"
+  ) {
+    return `file:${path}`;
+  }
+  if (name === "Bash" && typeof input["command"] === "string") {
+    return `bash:${input["command"]}`;
+  }
+  return null;
+}
+
+// Given all target-bearing ops (across the whole session, not just rankable
+// ones), mark every op on a target EXCEPT the last as superseded, recording the
+// op that supersedes it.
+function computeSupersession(ops: Op[]): Map<string, { turn: number; tool: string }> {
+  const byTarget = new Map<string, Op[]>();
+  for (const op of ops) {
+    const list = byTarget.get(op.target) ?? [];
+    list.push(op);
+    byTarget.set(op.target, list);
+  }
+  const superseded = new Map<string, { turn: number; tool: string }>();
+  for (const list of byTarget.values()) {
+    if (list.length < 2) continue;
+    list.sort((a, b) => a.turn - b.turn || a.seq - b.seq);
+    const last = list[list.length - 1];
+    for (let i = 0; i < list.length - 1; i++) {
+      superseded.set(list[i].id, { turn: last.turn, tool: last.name });
+    }
+  }
+  return superseded;
+}
+
 function isToolResultRow(row: TranscriptRow): boolean {
   if (row.type !== "user" || !isRecord(row.message)) return false;
   const c = row.message["content"];
@@ -144,7 +200,9 @@ export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
   };
 
   const toolNames = new Map<string, string>();
-  for (const turn of turns) {
+  const ops: Op[] = [];
+  let seq = 0;
+  turns.forEach((turn, ti) => {
     for (const row of turn.rows) {
       if (!isRecord(row.message)) continue;
       const c = row.message["content"];
@@ -157,10 +215,15 @@ export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
           && typeof b["name"] === "string"
         ) {
           toolNames.set(b["id"], b["name"]);
+          const target = toolTarget(b["name"], b["input"]);
+          if (target) ops.push({ id: b["id"], turn: ti, seq: seq++, name: b["name"], target });
         }
       }
     }
-  }
+  });
+  // tool_use_id -> the later op that supersedes it (for outputs AND inputs, both
+  // keyed by the producing tool_use's id).
+  const superseded = computeSupersession(ops);
 
   turns.forEach((turn, ti) => {
     const st: TurnStat = {
@@ -262,10 +325,45 @@ export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
   const grand = Object.values(typeTotals).reduce((a, b) => a + b, 0) || 1;
   const rankable = (turn: number) => turn < n - keepTurns;
 
+  // Enrich each candidate with prune-priority signals so the model ranks by
+  // scanning a pre-tiered list instead of reasoning over raw items. The metrics
+  // ORDER and ANNOTATE; they never decide — build acts only on the model's
+  // explicit keep-list. The model's job is to catch what the tiers get wrong
+  // (an old-but-live item; a small-but-critical one).
+  const enrich = (a: Attachment) => {
+    const id = a.ref.startsWith("o:") || a.ref.startsWith("i:") ? a.ref.slice(2) : null;
+    const sup = id ? superseded.get(id) : undefined;
+    const age = n - 1 - a.turn;
+    const tier: Tier = sup
+      ? "prime-prune"
+      : a.kind === "skill"
+        ? "prime-prune"
+        : a.size < KEEP_SIZE
+          ? "likely-keep"
+          : "review";
+    // Superseded + skill dumps float to the top; then by size, then age.
+    const pruneScore =
+      (sup ? 1e9 : 0) + (a.kind === "skill" ? 5e8 : 0) + a.size + age * 100;
+    return {
+      ...a,
+      age,
+      superseded: Boolean(sup),
+      supersededBy: sup ? `${sup.tool}@turn${sup.turn}` : null,
+      tier,
+      pruneScore,
+    };
+  };
+
   const rankableAttachments = attachments
     .filter((a) => rankable(a.turn))
-    .sort((a, b) => b.size - a.size);
+    .map(enrich)
+    .sort((a, b) => b.pruneScore - a.pruneScore);
   const rankableThinking = thinkingBlocks.filter((t) => rankable(t.turn));
+
+  const tierSummary = (["prime-prune", "review", "likely-keep"] as Tier[]).map((t) => {
+    const items = rankableAttachments.filter((a) => a.tier === t);
+    return { tier: t, count: items.length, chars: items.reduce((s, x) => s + x.size, 0) };
+  });
 
   return {
     summary: {
@@ -287,6 +385,10 @@ export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
       note:
         "attachment reclaim is lossless: tool outputs re-runnable, inputs on disk + Content-ID, skills re-invokable. thinking reclaim shown is SIGNATURE bytes only; true live-context reclaim is larger (decrypted reasoning). keepTurns region excluded.",
     },
+    // Prune-priority tiers (soft hints — you decide). Confirm prime-prune; spend
+    // judgment on review; likely-keep is cheap to leave inline. supersededBy on
+    // an attachment names the later op that made it stale.
+    tierSummary,
     perTurn: turnStats.map((t) => ({
       turn: t.turn,
       age: t.age,
