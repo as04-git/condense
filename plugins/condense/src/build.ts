@@ -19,7 +19,8 @@
 // Prints JSON: { "sessionId": "...", "transcriptPath": "...", "stats": {...} }
 
 import { randomUUID } from "node:crypto";
-import { unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
+import { forkForCondense } from "./fork";
 import {
   allocateOmission,
   loadOmissionCache,
@@ -35,10 +36,8 @@ import {
 } from "./prune";
 import {
   buildAssistantTurns,
-  createTranscriptSession,
   isRecord,
   readActiveTranscriptRows,
-  readPreservedMetadataEntries,
   type JsonRecord,
   type TranscriptRow,
   type Turn,
@@ -59,122 +58,220 @@ type Ranking = {
   keepAttachments: string[];
 };
 
-type Plan = {
-  prefixTurns: Turn[];
-  compactedTurns: Turn[];
-  preservedTurns: Turn[];
-  baseRow: TranscriptRow;
-};
-
-const POST_COMPACTION_NOTICE = `<post-compaction-notice>
-A condense operation has just been applied to all messages above. Prose was kept verbatim. Some historical tool input/output was omitted and is retrievable via the read_omitted_content tool using the appropriate Content ID. Older extended-thinking was not carried forward. You may need to reread files to regain exact context.
-</post-compaction-notice>`;
-
-function isCondenseBoundaryRow(row: TranscriptRow): boolean {
-  const c = row["condense"];
-  return isRecord(c) && c["boundary"] === true;
-}
 
 export async function runBuild(sourcePath: string, rankingValue: unknown) {
   const ranking = normalizeRanking(rankingValue);
 
-  const destination = await createTranscriptSession(sourcePath);
-  try {
-    // Drop any prior condense marker (a visible, non-meta row) so markers don't
-    // accumulate across generations — each condense re-emits exactly one fresh
-    // marker at the tail. (isMeta rows auto-drop; the visible marker won't, so
-    // strip it explicitly by its sentinel field.)
-    const rows = (await readActiveTranscriptRows(sourcePath)).filter(
-      (r) => !(isRecord(r) && r["condenseMarker"] === true),
-    );
-    const plan = createPlan(rows, ranking.keepTurns);
-    if (plan.compactedTurns.length === 0) {
-      throw new Error("Nothing to compact: no turns older than keepTurns.");
-    }
+  // --- Analyze the SOURCE (original uuids) to decide the fork slice + which
+  // rows the post-pass must leave untouched. ------------------------------
+  const sourceRows = await readActiveTranscriptRows(sourcePath);
+  const turns = buildAssistantTurns(sourceRows);
+  // Strip the trailing /condense operation turn(s) (skill dump + analyze call):
+  // the fork's upToMessageId slice ends at the last real message before them.
+  let end = turns.length;
+  while (end > 0 && isCondenseOperationTurn(turns[end - 1])) end--;
+  const keptTurns = turns.slice(0, end);
+  if (keptTurns.length <= ranking.keepTurns) {
+    throw new Error("Nothing to compact: no turns older than keepTurns.");
+  }
+  const lastKept = keptTurns[keptTurns.length - 1];
+  const cutoffUuid = lastKept.rows[lastKept.rows.length - 1]?.uuid;
+  // The keepTurns most-recent turns are left fully verbatim — collect their
+  // ORIGINAL row uuids so the post-pass skips them (they were never candidates).
+  const preserved = new Set<string>();
+  for (const t of keptTurns.slice(keptTurns.length - ranking.keepTurns)) {
+    for (const r of t.rows) if (typeof r.uuid === "string") preserved.add(r.uuid);
+  }
 
-    // Generation is read from the parent's preserved "condense #N" title — the
-    // boundary's generation field is NOT in the active chain, but the title is.
-    const metadataEntries = await readPreservedMetadataEntries(
-      sourcePath,
-      plan.baseRow.sessionId,
-      destination.sessionId,
-    );
-    const generation = parentGeneration(metadataEntries) + 1;
-    const { compactedRows, stats } = await buildCompactedRows(
-      plan,
-      destination.sessionId,
-      ranking,
-      generation,
-    );
-    const titledMetadata = withCondensedTitle(
-      dedupeSingletonMeta(metadataEntries),
-      rows,
-      destination.sessionId,
-      generation,
-      ranking.title,
-    );
-    // Mint a clean clone identity (mirror what /branch does): a fresh unique
-    // slug so we don't share ~/.claude/plans/<slug>.md with ancestors, the
-    // lowercase session_id updated to the new id (copyRow only fixed sessionId),
-    // and forkedFrom repointed to the TRUE immediate parent (the session we
-    // condensed) so lineage reflects the previous generation. Only overwrite
-    // slug/session_id where they already exist so we never alter a row's shape.
-    // Enforce a strictly linear parentUuid chain over the content rows. The
-    // source active chain can carry MULTIPLE leaves (e.g. user-interrupt
-    // artifacts leave dead-end assistant rows) which survive re-chaining as
-    // branches; CC's three leaf-resolution strategies can then disagree, and the
-    // /resume picker builds one entry per leaf. A condensed session is a single
-    // linear artifact, so re-chain each content row to its predecessor in file
-    // order — exactly one leaf (the marker), boundary as root.
-    let prevUuid: string | null = null;
-    for (const r of compactedRows) {
-      if (!isRecord(r) || typeof r["uuid"] !== "string") continue;
-      r["parentUuid"] = prevUuid;
-      prevUuid = r["uuid"] as string;
-    }
-
-    const cloneSlug = `condense-${randomUUID().slice(0, 8)}`;
-    const parentSessionId = plan.baseRow.sessionId;
-    const allRows = [...titledMetadata, ...compactedRows];
-    // Strictly-increasing timestamps in file order: CC's leaf resolution breaks
-    // ties by max timestamp (sessionStorage.ts:2055), so stamping one identical
-    // timestamp on every row (as we did) removes the ordering signal and can let
-    // the preview and the model anchor to different leaves. Incrementing per row
-    // guarantees the last row (the marker) is the unambiguous leaf.
-    const baseMs = Date.now();
-    allRows.forEach((r, i) => {
-      if (!isRecord(r)) return;
-      // Load-bearing invariant (source: metadata resolves by
-      // map.get(leafMessage.sessionId)): EVERY row's sessionId must equal the
-      // new id or the title silently vanishes. copyRow set it on message rows;
-      // enforce it uniformly here as a backstop.
-      r["sessionId"] = destination.sessionId;
-      r["timestamp"] = new Date(baseMs + i).toISOString();
-      if ("slug" in r) r["slug"] = cloneSlug;
-      if ("session_id" in r) r["session_id"] = destination.sessionId;
-      if ("forkedFrom" in r) r["forkedFrom"] = { sessionId: parentSessionId };
+  // Generation + title come from the SOURCE file's title meta rows. Read them
+  // RAW: they are minimal ({type, customTitle/agentName, sessionId,
+  // condenseGeneration}) with no uuid, so readTranscriptRows' isTranscriptRow
+  // filter would drop them.
+  const titleRows = (await readFile(sourcePath, "utf8"))
+    .split("\n")
+    .flatMap((line) => {
+      const t = line.trim();
+      if (!t) return [];
+      try {
+        const r = JSON.parse(t);
+        return isRecord(r) && (r["type"] === "custom-title" || r["type"] === "agent-name")
+          ? [r as TranscriptRow]
+          : [];
+      } catch {
+        return [];
+      }
     });
-    await writeTranscriptEntries(destination.transcriptPath, allRows);
+  const generation = parentGeneration(titleRows) + 1;
+  const title = computeCondensedTitle(titleRows, sourceRows, generation, ranking.title);
+
+  // --- Fork via the SDK (owns clone identity, uuid remap, chain, metadata). --
+  const fork = await forkForCondense(sourcePath, { upToMessageId: cutoffUuid, title });
+  try {
+    const cache = await loadOmissionCache(fork.sessionId);
+    const io = { cache, sessionId: fork.sessionId };
+    const stats = {
+      thinkingKept: 0,
+      thinkingDropped: 0,
+      toolInputsKept: 0,
+      toolInputsPruned: 0,
+      toolInputsPrePruned: 0,
+      toolOutputsKept: 0,
+      toolOutputsPruned: 0,
+      toolOutputsPrePruned: 0,
+      injectedKept: 0,
+      injectedPrunedToContentId: 0,
+      injectedSkillNoted: 0,
+      emptyAssistantRowsDropped: 0,
+      priorMarkersDropped: 0,
+      skillsNoted: [] as string[],
+    };
+    const attachMode = ranking.modes.attachments;
+    const keepAttachments = new Set(ranking.keepAttachments);
+    const keepThinking = new Set(
+      ranking.keepThinking.map((t) => `${t.uuid}#${t.blockIndex}`),
+    );
+
+    // --- Post-pass: prune content in the forked rows in place. Refs from the
+    // ranking are keyed by ORIGINAL uuids; each forked row carries its original
+    // uuid in forkedFrom.messageUuid. ---------------------------------------
+    const drop = new Set<string>(); // forked uuids to remove (empty rows, old markers)
+    for (const row of fork.rows) {
+      if (typeof row.uuid !== "string") continue;
+      const ff = row["forkedFrom"];
+      const originalUuid = isRecord(ff) && typeof ff["messageUuid"] === "string"
+        ? ff["messageUuid"]
+        : undefined;
+      // Strip a prior generation's visible marker so markers don't accumulate.
+      if (row["condenseMarker"] === true) {
+        drop.add(row.uuid);
+        stats.priorMarkersDropped += 1;
+        continue;
+      }
+      // keepTurns region: untouched.
+      if (originalUuid && preserved.has(originalUuid)) continue;
+
+      if (row.type === "assistant") {
+        filterThinking(row, originalUuid ?? "", ranking.modes.thinking, keepThinking, stats);
+        applyToolInputMode(row, attachMode, keepAttachments, io, stats);
+        if (isEmptyMessageContent(row)) {
+          drop.add(row.uuid);
+          stats.emptyAssistantRowsDropped += 1;
+        }
+      } else if (isToolResultRow(row)) {
+        applyToolOutputMode(row, attachMode, keepAttachments, io, stats);
+      } else if (row.type === "user") {
+        applyInjectedMode(row, originalUuid ?? "", attachMode, keepAttachments, io, stats);
+      }
+    }
+
+    // Drop marked rows and re-chain any child of a dropped row to the nearest
+    // surviving ancestor (localized — NOT the full clone re-chain the SDK owns).
+    const parentOf = new Map<string, string | null>();
+    for (const r of fork.rows) {
+      if (typeof r.uuid === "string") {
+        parentOf.set(r.uuid, typeof r.parentUuid === "string" ? r.parentUuid : null);
+      }
+    }
+    const resolve = (u: string | null): string | null => {
+      while (u && drop.has(u)) u = parentOf.get(u) ?? null;
+      return u;
+    };
+    const kept = fork.rows.filter((r) => !(typeof r.uuid === "string" && drop.has(r.uuid)));
+    for (const r of kept) {
+      if (typeof r.parentUuid === "string" && drop.has(r.parentUuid)) {
+        r.parentUuid = resolve(r.parentUuid);
+      }
+    }
+
+    // --- Own the title + append the closing marker. Strip any title rows the
+    // SDK wrote/derived (or the source carried) so ours are authoritative, then
+    // append a fresh custom-title + agent-name pair and the deterministic marker
+    // (the SDK has no marker mechanism). --------------------------------------
+    const stripped = kept.filter(
+      (r) =>
+        r.type !== "custom-title" && r.type !== "agent-name" && r.type !== "ai-title",
+    );
+    const finalRows = dedupeSingletonMeta(stripped as JsonRecord[]);
+    finalRows.push(...makeTitleRows(fork.sessionId, title, generation));
+    const markerRow = makeMarkerRow(
+      fork.rows,
+      kept,
+      fork.sessionId,
+      condenseMarkerText(parentSessionIdOf(sourcePath), generation, ranking.keepTurns, stats),
+    );
+    if (markerRow) finalRows.push(markerRow);
+
+    await saveOmissionCache(fork.sessionId, cache);
+    await writeTranscriptEntries(fork.transcriptPath, finalRows);
 
     return {
-      sessionId: destination.sessionId,
-      transcriptPath: destination.transcriptPath,
+      sessionId: fork.sessionId,
+      transcriptPath: fork.transcriptPath,
       generation,
       stats,
     };
   } catch (error) {
-    await unlink(destination.transcriptPath).catch(() => undefined);
+    await unlink(fork.transcriptPath).catch(() => undefined);
     throw error;
   }
 }
 
-// Current-state singleton meta rows that Claude Code rewrites repeatedly during
-// a session; only the latest is meaningful. Each condense preserves the whole
-// history, so without this they compound every generation (like custom-title
-// did). custom-title is handled separately by withCondensedTitle.
+// Source session id from its file path (basename without .jsonl).
+function parentSessionIdOf(sourcePath: string): string {
+  const base = sourcePath.split("/").pop() ?? sourcePath;
+  return base.replace(/\.jsonl$/, "");
+}
+
+// Emit BOTH title rows CC needs, keyed to the new session: `custom-title` (the
+// /resume picker + tab title) and `agent-name` (the in-app banner pill). We own
+// the title rather than relying on forkSession's `title` param, which the SDK
+// ignores when `upToMessageId` is set (and otherwise appends a "(fork)" title).
+// These are pure metadata rows — minimal shape, no uuid/parentUuid/timestamp.
+function makeTitleRows(sessionId: string, title: string, generation: number): JsonRecord[] {
+  return [
+    { type: "custom-title", customTitle: title, sessionId, condenseGeneration: generation },
+    { type: "agent-name", agentName: title, sessionId },
+  ];
+}
+
+// Build the visible closing marker as the final content row (the single leaf).
+function makeMarkerRow(
+  forkRows: TranscriptRow[],
+  keptRows: TranscriptRow[],
+  sessionId: string,
+  text: string,
+): JsonRecord | null {
+  const template = forkRows.find((r) => r.type === "user" || r.type === "assistant");
+  if (!isRecord(template)) return null;
+  // Carry the session/environment fields CC stamps on a message row; drop the
+  // message-specific ones we set fresh.
+  const fields: JsonRecord = { ...template };
+  for (const k of ["message", "uuid", "parentUuid", "type", "condenseMarker", "requestId", "isMeta", "forkedFrom"]) {
+    delete fields[k];
+  }
+  // Newest timestamp so the marker is the unambiguous leaf (max-ts tiebreak).
+  let maxMs = 0;
+  for (const r of forkRows) {
+    const t = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
+    if (Number.isFinite(t)) maxMs = Math.max(maxMs, t);
+  }
+  const tail = keptRows[keptRows.length - 1];
+  return {
+    ...fields,
+    type: "user",
+    uuid: randomUUID(),
+    parentUuid: isRecord(tail) && typeof tail.uuid === "string" ? tail.uuid : null,
+    sessionId,
+    condenseMarker: true,
+    timestamp: new Date((maxMs || Date.now()) + 1000).toISOString(),
+    message: { role: "user", content: text },
+  };
+}
+
 // Current-state singleton meta types (last-wins per sessionId, confirmed from
-// v2.1.88 sessionStorage re-stamp logic). agent-name / custom-title / ai-title
-// are owned by withCondensedTitle; the rest are deduped to their last occurrence
+// v2.1.88 sessionStorage re-stamp logic); only the latest is meaningful.
+// agent-name / custom-title / ai-title are stripped and re-emitted fresh by the
+// post-pass (see makeTitleRows); the rest are deduped to their last occurrence
 // so they don't compound across generations.
 const SINGLETON_META = new Set([
   "mode",
@@ -237,24 +334,22 @@ function firstUserPrompt(rows: TranscriptRow[]): string {
   return "session";
 }
 
-// Session title for the compacted session: "🗜 condense #N — <base>". N is the
-// generation (survives repeated condensing via the boundary's generation field);
-// <base> strips any prior condense/branch decoration so titles don't stack.
-function withCondensedTitle(
-  metadataEntries: JsonRecord[],
+// Title for the compacted session: "🗜 condense #N — <base>". N is the
+// generation; <base> carries the parent condensed session's <desc> forward (or
+// derives from the first user prompt), stripping prior decoration so titles
+// don't stack. Passed to forkSession as `title` (which writes the custom-title
+// row); the matching agent-name banner row is appended separately.
+function computeCondensedTitle(
+  titleRows: TranscriptRow[],
   rows: TranscriptRow[],
-  sessionId: string,
   generation: number,
   titleOverride?: string,
-): JsonRecord[] {
+): string {
   let base = titleOverride ?? "";
   if (!base) {
-    // If the parent was already a condensed session ("🗜 condense #N — <desc>"),
-    // carry its <desc> forward (strip the prefix). Otherwise derive from the
-    // first user prompt — not the parent's auto/branch title.
     let parent = "";
-    for (const e of metadataEntries) {
-      if (isRecord(e) && e["type"] === "custom-title" && typeof e["customTitle"] === "string") {
+    for (const e of titleRows) {
+      if (e.type === "custom-title" && typeof e["customTitle"] === "string") {
         parent = e["customTitle"];
       }
     }
@@ -262,32 +357,7 @@ function withCondensedTitle(
     base = m ? m[1].trim() : firstUserPrompt(rows);
   }
   if (base.length > 80) base = `${base.slice(0, 80).trim()}…`;
-  const customTitle = `🗜 condense #${generation} — ${base}`;
-
-  // Claude Code feeds the two title surfaces from two DIFFERENT rows (confirmed
-  // from v2.1.88 source): the /resume picker + tab title read `custom-title`,
-  // while the in-app banner pill reads `agent-name` (agentNames.get(sessionId)).
-  // /rename writes BOTH with the same value; a clone that writes only
-  // custom-title leaves the parent's stale agent-name as last-wins -> fresh
-  // picker, stale banner. So we mirror /rename: strip every inherited
-  // custom-title / agent-name / ai-title (ai-title is never re-appended by CC —
-  // custom-title always wins) and emit one fresh pair keyed to the new session.
-  const stripped = metadataEntries.filter(
-    (e) =>
-      !(
-        isRecord(e) &&
-        (e["type"] === "custom-title" ||
-          e["type"] === "agent-name" ||
-          e["type"] === "ai-title")
-      ),
-  );
-  // condenseGeneration is a durable numeric carrier so the counter survives even
-  // if the emoji/em-dash title text is ever normalized (regex is the fallback).
-  return [
-    { type: "custom-title", customTitle, sessionId, condenseGeneration: generation },
-    { type: "agent-name", agentName: customTitle, sessionId },
-    ...stripped,
-  ];
+  return `🗜 condense #${generation} — ${base}`;
 }
 
 function normalizeRanking(value: unknown): Ranking {
@@ -340,170 +410,6 @@ function isCondenseOperationTurn(turn: Turn): boolean {
     }
   }
   return false;
-}
-
-function createPlan(rows: TranscriptRow[], keepTurns: number): Plan {
-  const baseRow = rows.find(
-    (row) => row.type === "user" || row.type === "assistant",
-  );
-  if (!baseRow) {
-    throw new Error("Transcript does not contain compactable conversation rows.");
-  }
-
-  let turns = buildAssistantTurns(rows);
-  // Strip the trailing /condense operation's own turn(s) — the skill dump +
-  // analyze call — so the compacted session ends at the last REAL work turn
-  // instead of mid-machinery (which primed the resumed model to re-condense).
-  while (turns.length > 0 && isCondenseOperationTurn(turns[turns.length - 1])) {
-    turns = turns.slice(0, -1);
-  }
-  // Everything after a previous condense boundary is fair game; the boundary
-  // itself is a meta row that buildAssistantTurns won't include in a turn.
-  const boundaryStart =
-    turns.findLastIndex((turn) => turn.rows.some(isCondenseBoundaryRow)) + 1;
-  const compactEnd =
-    keepTurns <= 0
-      ? turns.length
-      : Math.max(boundaryStart, turns.length - keepTurns);
-
-  return {
-    prefixTurns: turns.slice(0, boundaryStart),
-    compactedTurns: turns.slice(boundaryStart, compactEnd),
-    preservedTurns: turns.slice(compactEnd),
-    baseRow,
-  };
-}
-
-async function buildCompactedRows(
-  plan: Plan,
-  sessionId: string,
-  ranking: Ranking,
-  generation: number,
-): Promise<{ compactedRows: TranscriptRow[]; stats: JsonRecord }> {
-  const rows: TranscriptRow[] = [];
-  const copiedUuids = new Map<string, string>();
-  const omissionCache = await loadOmissionCache(sessionId);
-  const timestamp = new Date().toISOString();
-  const keepThinking = new Set(
-    ranking.keepThinking.map((e) => `${e.uuid}#${e.blockIndex}`),
-  );
-  const keepAttachments = new Set(ranking.keepAttachments);
-  const attachMode = ranking.modes.attachments;
-
-  const stats = {
-    thinkingKept: 0,
-    thinkingDropped: 0,
-    toolInputsKept: 0,
-    toolInputsPruned: 0,
-    toolInputsPrePruned: 0,
-    toolOutputsKept: 0,
-    toolOutputsPruned: 0,
-    toolOutputsPrePruned: 0,
-    injectedKept: 0,
-    injectedPrunedToContentId: 0,
-    injectedSkillNoted: 0,
-    emptyAssistantRowsDropped: 0,
-    skillsNoted: [] as string[],
-  };
-
-  const lastOriginalRow = sourceTurns(plan)
-    .flatMap((turn) => turn.rows)
-    .at(-1);
-  if (!lastOriginalRow) {
-    throw new Error("Compaction plan has no source rows.");
-  }
-
-  // Boundary marker.
-  const boundaryUuid = randomUUID();
-  rows.push({
-    ...copySessionFields(plan.baseRow, sessionId, timestamp),
-    type: "user",
-    uuid: boundaryUuid,
-    parentUuid: null,
-    isMeta: true,
-    message: {
-      id: `msg_${randomUUID()}`,
-      role: "user",
-      content: POST_COMPACTION_NOTICE,
-    },
-    // null, not lastOriginalRow.uuid: that referenced a pre-clone uuid that no
-    // longer exists in this file. Source confirms logicalParentUuid is never
-    // walked on load (inert), but a dangling ref is untidy — keep it clean.
-    logicalParentUuid: null,
-    condense: { boundary: true, generation },
-  });
-  let parentUuid: string | null = boundaryUuid;
-
-  // Prefix + preserved turns: verbatim.
-  for (const turn of plan.prefixTurns) {
-    parentUuid = copyTurnVerbatim(turn, rows, copiedUuids, sessionId, timestamp, parentUuid);
-  }
-
-  // Compacted region: prose verbatim; thinking per mode; tool inputs + outputs
-  // per the (shared) tools mode. keepTurns region left fully untouched.
-  const io = { cache: omissionCache, sessionId };
-  for (const turn of plan.compactedTurns) {
-    for (const row of turn.rows) {
-      const newParent = row.parentUuid
-        ? copiedUuids.get(row.parentUuid) ?? parentUuid
-        : parentUuid;
-      const copied = copyRow(row, sessionId, timestamp, newParent);
-
-      if (row.type === "assistant") {
-        filterThinking(copied, row.uuid, ranking.modes.thinking, keepThinking, stats);
-        applyToolInputMode(copied, attachMode, keepAttachments, io, stats);
-        if (isEmptyMessageContent(copied)) {
-          // A thinking-only assistant message whose thinking was all dropped
-          // would become content:[] — invalid on resume. Drop the row and
-          // rewire any children to its parent. Such rows carry no tool_use, so
-          // no tool_result depends on them.
-          copiedUuids.set(row.uuid, newParent ?? boundaryUuid);
-          stats.emptyAssistantRowsDropped += 1;
-          continue; // do not push; do not advance parentUuid
-        }
-      } else if (isToolResultRow(row)) {
-        applyToolOutputMode(copied, attachMode, keepAttachments, io, stats);
-      } else if (row.type === "user") {
-        // Genuine user prose (string content) is untouched; only injected
-        // list-content (skill dumps / structured injections) is a rankable attachment.
-        applyInjectedMode(copied, row.uuid, attachMode, keepAttachments, io, stats);
-      }
-      // everything else: verbatim (already copied)
-
-      copiedUuids.set(row.uuid, copied.uuid);
-      rows.push(copied);
-      parentUuid = copied.uuid;
-    }
-  }
-
-  for (const turn of plan.preservedTurns) {
-    parentUuid = copyTurnVerbatim(turn, rows, copiedUuids, sessionId, timestamp, parentUuid);
-  }
-
-  // Deterministic closing marker — the final context the resumed model sees.
-  // Purely factual (built from stats), so the model can't confabulate what is
-  // present vs pruned. isMeta + string content => excluded from future turns
-  // (auto-replaced next condense) and never re-detected as an injected attachment.
-  const sourceSessionId =
-    typeof plan.baseRow.sessionId === "string" ? plan.baseRow.sessionId : "unknown";
-  // VISIBLE (non-meta) user row so the human sees it on resume and can verify
-  // delivery directly — not just a model-only meta row. Content is a string, so
-  // it is never re-detected as an injected attachment; condenseMarker:true lets
-  // the next condense strip it (see runBuild) so markers don't accumulate.
-  rows.push({
-    ...copySessionFields(plan.baseRow, sessionId, timestamp),
-    type: "user",
-    uuid: randomUUID(),
-    parentUuid,
-    condenseMarker: true,
-    message: {
-      role: "user",
-      content: condenseMarkerText(sourceSessionId, generation, ranking.keepTurns, stats),
-    },
-  });
-
-  await saveOmissionCache(sessionId, omissionCache);
-  return { compactedRows: rows, stats };
 }
 
 function condenseMarkerText(
@@ -722,56 +628,6 @@ function applyToolOutputMode(
   }
 }
 
-// --- transcript surgery (ported from magic-compact, condense-renamed) --------
-
-function copyTurnVerbatim(
-  turn: Turn,
-  rows: TranscriptRow[],
-  copiedUuids: Map<string, string>,
-  sessionId: string,
-  timestamp: string,
-  initialParentUuid: string | null,
-): string | null {
-  let parentUuid = initialParentUuid;
-  for (const row of turn.rows) {
-    const newParent = row.parentUuid
-      ? copiedUuids.get(row.parentUuid) ?? parentUuid
-      : parentUuid;
-    const copied = copyRow(row, sessionId, timestamp, newParent);
-    copiedUuids.set(row.uuid, copied.uuid);
-    rows.push(copied);
-    parentUuid = copied.uuid;
-  }
-  return parentUuid;
-}
-
-function copyRow(
-  row: TranscriptRow,
-  sessionId: string,
-  timestamp: string,
-  parentUuid: string | null,
-): TranscriptRow {
-  const copied = structuredClone(row) as TranscriptRow;
-  copied.uuid = randomUUID();
-  copied.parentUuid = parentUuid;
-  copied.sessionId = sessionId;
-  copied.timestamp = timestamp;
-  return copied;
-}
-
-function copySessionFields(
-  row: TranscriptRow,
-  sessionId: string,
-  timestamp: string,
-): TranscriptRow {
-  const copied = structuredClone(row) as TranscriptRow;
-  copied.sessionId = sessionId;
-  copied.timestamp = timestamp;
-  copied.isSidechain = false;
-  delete copied.message;
-  return copied;
-}
-
 function isToolResultRow(row: TranscriptRow): boolean {
   if (row.type !== "user" || !isRecord(row.message)) return false;
   const content = row.message["content"];
@@ -779,10 +635,6 @@ function isToolResultRow(row: TranscriptRow): boolean {
     Array.isArray(content)
     && content.some((b) => isRecord(b) && b["type"] === "tool_result")
   );
-}
-
-function sourceTurns(plan: Plan): Turn[] {
-  return [...plan.prefixTurns, ...plan.compactedTurns, ...plan.preservedTurns];
 }
 
 function isEmptyMessageContent(row: TranscriptRow): boolean {
