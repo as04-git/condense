@@ -1,7 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { access, appendFile, copyFile, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -34,60 +32,6 @@ export async function readActiveTranscriptRows(
   return buildActiveChain(
     lastBoundaryIndex === -1 ? rows : rows.slice(lastBoundaryIndex + 1),
   );
-}
-
-export async function copyTranscriptToNewSession(
-  sourceTranscriptPath: string,
-): Promise<TranscriptCopy> {
-  const destination = await createTranscriptSession(sourceTranscriptPath);
-  await copyFile(
-    sourceTranscriptPath,
-    destination.transcriptPath,
-    constants.COPYFILE_EXCL,
-  );
-  return destination;
-}
-
-export async function createTranscriptSession(
-  sourceTranscriptPath: string,
-): Promise<TranscriptCopy> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const sessionId = randomUUID();
-    const transcriptPath = join(
-      dirname(sourceTranscriptPath),
-      `${sessionId}.jsonl`,
-    );
-
-    try {
-      await access(transcriptPath, constants.F_OK);
-    } catch (error) {
-      if (isRecord(error) && error["code"] === "ENOENT") {
-        return { sessionId, transcriptPath };
-      }
-
-      throw error;
-    }
-  }
-
-  throw new Error("Unable to create a unique transcript session.");
-}
-
-export async function readPreservedMetadataEntries(
-  transcriptPath: string,
-  sourceSessionId: string,
-  destinationSessionId: string,
-): Promise<JsonRecord[]> {
-  const entries = await readTranscriptEntries(transcriptPath);
-  return entries
-    .filter(
-      (entry): entry is JsonRecord =>
-        isRecord(entry)
-        && !isTranscriptRow(entry)
-        && isPreservedMetadataEntry(entry),
-    )
-    .map(entry =>
-      rewriteSessionMetadata(entry, sourceSessionId, destinationSessionId),
-    );
 }
 
 export async function writeTranscriptEntries(
@@ -321,80 +265,4 @@ async function readTranscriptEntries(
     }
   });
   return entries;
-}
-
-function isPreservedMetadataEntry(entry: JsonRecord): boolean {
-  return PRESERVED_METADATA_TYPES.has(String(entry["type"]));
-}
-
-function rewriteSessionMetadata(
-  entry: JsonRecord,
-  sourceSessionId: string,
-  destinationSessionId: string,
-): JsonRecord {
-  const copied = structuredClone(entry) as JsonRecord;
-  if (copied["sessionId"] === sourceSessionId) {
-    copied["sessionId"] = destinationSessionId;
-  }
-  return copied;
-}
-
-const PRESERVED_METADATA_TYPES = new Set([
-  "custom-title",
-  "ai-title",
-  // "last-prompt" deliberately NOT preserved: the /resume picker preview reads
-  // this field as its headline (sessionStorage.ts:4760), so carrying the
-  // parent's last prompt (e.g. "/branch") makes the picker show stale text that
-  // disagrees with the actually-loaded condensed chain. Let CC regenerate it on
-  // the resumed session's first real prompt.
-  "tag",
-  "agent-name",
-  "agent-color",
-  "agent-setting",
-  "mode",
-  // "worktree-state" NOT preserved: a clone must not think it's in the parent's
-  // worktree. Both /branch and --fork-session strip it (sessionRestore.ts:470).
-  "pr-link",
-  "task-summary",
-  "permission-mode",
-]);
-
-export async function resolveSessionTitle(
-  transcriptPath: string,
-): Promise<string | null> {
-  const entries = await readTranscriptEntries(transcriptPath);
-  let customTitle: string | null = null;
-  let aiTitle: string | null = null;
-  for (const entry of entries) {
-    if (!isRecord(entry)) {
-      continue;
-    }
-    if (
-      entry["type"] === "custom-title"
-      && typeof entry["customTitle"] === "string"
-    ) {
-      customTitle = entry["customTitle"];
-    } else if (
-      entry["type"] === "ai-title"
-      && typeof entry["aiTitle"] === "string"
-    ) {
-      aiTitle = entry["aiTitle"];
-    }
-  }
-  return customTitle ?? aiTitle;
-}
-
-export async function appendCustomTitle(
-  transcriptPath: string,
-  sessionId: string,
-  title: string,
-): Promise<void> {
-  const entry = {
-    type: "custom-title",
-    customTitle: title,
-    sessionId,
-  };
-  await appendFile(transcriptPath, `${JSON.stringify(entry)}\n`, {
-    mode: 0o600,
-  });
 }
