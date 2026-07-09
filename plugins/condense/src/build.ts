@@ -455,8 +455,9 @@ function condenseMarkerText(
   const prePrunedOut = stats.toolOutputsPrePruned;
   const prePrunedIn = stats.toolInputsPrePruned;
   const lines = [
-    `🗜 CONDENSED SESSION (generation ${generation}) — you are now inside the condensed result.`,
-    `Continue the work below; do NOT re-condense unless the user asks. This marker is deterministic (built from the build step's own tallies) — trust it over memory for what is present vs pruned.`,
+    `🗜 CONDENSED SESSION (generation ${generation}) — you are inside the condensed result.`,
+    `Do NOT re-condense unless the user asks. Trust this marker over memory for what is present vs pruned.`,
+    `To recover any pruned content, call the read_omitted_content tool with the Content-ID shown in its placeholder.`,
     ``,
     `FRESHLY PRUNED this generation (bytes just moved out; recoverable):`,
     `  • ${stats.toolOutputsPruned} tool-output(s) + ${stats.toolInputsPruned} tool-input(s) — placeholder inline; retrieve exact bytes with read_omitted_content <Content-ID shown at each placeholder>.`,
