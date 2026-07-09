@@ -108,7 +108,8 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
   const fork = await forkForCondense(sourcePath, { upToMessageId: cutoffUuid, title });
   try {
     const cache = await loadOmissionCache(fork.sessionId);
-    const io = { cache, sessionId: fork.sessionId };
+    // io is populated after the toolNames/toolInputs scan below.
+    let io: { cache: typeof cache; sessionId: string; toolNames: Map<string, string>; toolInputs: Map<string, JsonRecord> };
     const stats = {
       thinkingKept: 0,
       thinkingDropped: 0,
@@ -131,6 +132,25 @@ export async function runBuild(sourcePath: string, rankingValue: unknown) {
       ranking.keepThinking.map((t) => `${t.uuid}#${t.blockIndex}`),
     );
 
+    // Build tool-use maps for context-aware output notices. tool_use blocks carry
+    // the tool name and input; their matching tool_result carries the output but
+    // not the name/input. Mapping by tool_use_id lets the output pruner say
+    // "Read output (/path/to/file.ts)" instead of generic "Tool output".
+    const toolNames = new Map<string, string>();
+    const toolInputs = new Map<string, JsonRecord>();
+    for (const row of fork.rows) {
+      if (!isRecord(row.message)) continue;
+      const c = row.message["content"];
+      if (!Array.isArray(c)) continue;
+      for (const b of c) {
+        if (isRecord(b) && b["type"] === "tool_use" && typeof b["id"] === "string") {
+          if (typeof b["name"] === "string") toolNames.set(b["id"], b["name"]);
+          if (isRecord(b["input"])) toolInputs.set(b["id"], b["input"] as JsonRecord);
+        }
+      }
+    }
+
+    io = { cache, sessionId: fork.sessionId, toolNames, toolInputs };
     // --- Post-pass: prune content in the forked rows in place. Refs from the
     // ranking are keyed by ORIGINAL uuids; each forked row carries its original
     // uuid in forkedFrom.messageUuid. ---------------------------------------
@@ -583,7 +603,7 @@ function applyToolOutputMode(
   row: TranscriptRow,
   mode: Mode,
   keepTools: Set<string>,
-  ctx: { cache: Parameters<typeof allocateOmission>[0]; sessionId: string },
+  ctx: { cache: Parameters<typeof allocateOmission>[0]; sessionId: string; toolNames: Map<string, string>; toolInputs: Map<string, JsonRecord> },
   stats: { toolOutputsKept: number; toolOutputsPruned: number; toolOutputsPrePruned: number },
 ): void {
   if (!isRecord(row.message)) return;
@@ -619,8 +639,9 @@ function applyToolOutputMode(
       continue;
     }
     const contentId = allocateOmission(ctx.cache, ctx.sessionId, text);
+    const toolName = toolUseId ? ctx.toolNames.get(toolUseId) ?? "?" : "?";
     block["content"] = outputOmissionNotice(
-      "Tool output omitted by condense. Retrieve with read_omitted_content if the exact I/O is needed and cannot be re-derived by re-running the tool.",
+      smartOutputDescription(toolName, text, toolUseId ? ctx.toolInputs.get(toolUseId) : undefined),
       text.length,
       contentId,
     );
@@ -643,6 +664,58 @@ function isEmptyMessageContent(row: TranscriptRow): boolean {
   if (Array.isArray(content)) return content.length === 0;
   if (typeof content === "string") return content.trim() === "";
   return false;
+}
+
+function previewLine(text: string, max = 80): string {
+  const line = text.trim().split("\n")[0]?.trim() ?? "";
+  return line.length <= max ? line : `${line.slice(0, max).trim()}…`;
+}
+
+function smartOutputDescription(
+  toolName: string,
+  text: string,
+  toolInput?: JsonRecord,
+): string {
+  // Task-notification (agent result) — the most valuable type; extract agent
+  // description + first line of result.
+  const taskMatch = text.match(/<summary>\s*(?:Agent\s+)?"([^"]+)"/);
+  const resultMatch = text.match(/<result>\s*([\s\S]{1,120})/);
+  if (taskMatch || resultMatch) {
+    const desc = taskMatch ? ` "${taskMatch[1]}"` : "";
+    const preview = resultMatch ? ` Result began: "${previewLine(resultMatch[1])}"` : "";
+    return `Agent result${desc} omitted by condense.${preview} Retrieve with read_omitted_content.`;
+  }
+
+  // File operations — show the file path.
+  if (toolInput && (toolName === "Read" || toolName === "Edit" || toolName === "Write" || toolName === "NotebookEdit")) {
+    const path = toolInput["file_path"] ?? toolInput["notebook_path"] ?? toolInput["path"];
+    if (typeof path === "string") {
+      return `${toolName} output omitted by condense (${path}). Reread the file, or retrieve with read_omitted_content.`;
+    }
+  }
+
+  // Bash — show first line of command from input if available.
+  if (toolName === "Bash" && toolInput && typeof toolInput["command"] === "string") {
+    const cmd = previewLine(toolInput["command"], 60);
+    return `Bash output omitted by condense (${cmd}). Re-run the command, or retrieve with read_omitted_content.`;
+  }
+
+  // WebFetch / WebSearch — show the URL/query.
+  if (toolName === "WebFetch" && toolInput && typeof toolInput["url"] === "string") {
+    return `WebFetch output omitted by condense (${toolInput["url"]}). Re-fetch, or retrieve with read_omitted_content.`;
+  }
+  if (toolName === "WebSearch" && toolInput && typeof toolInput["query"] === "string") {
+    return `WebSearch output omitted by condense (query: "${toolInput["query"]}"). Re-search, or retrieve with read_omitted_content.`;
+  }
+
+  // Grep / find — show the pattern/path.
+  if ((toolName === "Grep" || toolName === "Bash") && toolInput && typeof toolInput["pattern"] === "string") {
+    return `${toolName} output omitted by condense (pattern: "${toolInput["pattern"]}"). Re-run, or retrieve with read_omitted_content.`;
+  }
+
+  // Generic fallback — at least name the tool + a content preview.
+  const head = previewLine(text);
+  return `${toolName} output omitted by condense.${head ? ` Began: "${head}"` : ""} Retrieve with read_omitted_content if needed.`;
 }
 
 function stringifyContent(content: unknown): string {

@@ -20,56 +20,82 @@ type OmissionCache = Parameters<typeof allocateOmission>[0];
 // are always kept verbatim and never appear as ranking candidates.
 const INPUT_FLOOR_CHARS = 1024;
 
-type InputSpec =
-  | { kind: "omit"; fields: string[]; description: string }
-  | { kind: "truncate"; field: string; keep: number; description: string };
-
 // Per-tool big-input field map. Tools not listed have no large input worth
 // pruning (their inputs — filepaths, patterns, small args — stay verbatim).
+// descriptionFn receives the tool's input so it can extract identifying context
+// (file path, agent description, etc.) for the omission notice.
+type InputSpec =
+  | { kind: "omit"; fields: string[]; descriptionFn: (input: JsonRecord) => string }
+  | { kind: "truncate"; field: string; keep: number; descriptionFn: (input: JsonRecord) => string };
+
+function filePath(input: JsonRecord): string {
+  const p = input["file_path"] ?? input["notebook_path"];
+  return typeof p === "string" ? ` (${p})` : "";
+}
+function firstLine(s: unknown, max = 80): string {
+  if (typeof s !== "string" || !s.trim()) return "";
+  const line = s.trim().split("\n")[0]?.trim() ?? "";
+  return line.length <= max ? line : `${line.slice(0, max).trim()}…`;
+}
+
 const INPUT_SPECS: Record<string, InputSpec> = {
   Write: {
     kind: "omit",
     fields: ["content"],
-    description:
-      "File write contents omitted by condense. Reread the file for current contents, or retrieve the exact bytes with read_omitted_content.",
+    descriptionFn: (i) =>
+      `File write contents omitted by condense${filePath(i)}. Reread the file for current contents, or retrieve the exact bytes with read_omitted_content.`,
   },
   Edit: {
     kind: "omit",
     fields: ["old_string", "new_string"],
-    description:
-      "File edit strings omitted by condense. Reread the file for current contents, or retrieve with read_omitted_content.",
+    descriptionFn: (i) =>
+      `File edit strings omitted by condense${filePath(i)}. Reread the file for current contents, or retrieve with read_omitted_content.`,
   },
   NotebookEdit: {
     kind: "omit",
     fields: ["new_source"],
-    description:
-      "Notebook edit source omitted by condense. Reread the notebook, or retrieve with read_omitted_content.",
+    descriptionFn: (i) =>
+      `Notebook edit source omitted by condense${filePath(i)}. Reread the notebook, or retrieve with read_omitted_content.`,
   },
   Agent: {
     kind: "omit",
     fields: ["prompt"],
-    description: "Agent prompt omitted by condense. Retrieve with read_omitted_content if needed.",
+    descriptionFn: (i) => {
+      const desc = typeof i["description"] === "string" ? ` "${i["description"]}"` : "";
+      const head = firstLine(i["prompt"]);
+      return `Agent prompt${desc} omitted by condense.${head ? ` Began: "${head}"` : ""} Retrieve with read_omitted_content if needed.`;
+    },
   },
   Workflow: {
     kind: "omit",
     fields: ["script"],
-    description: "Workflow script omitted by condense. Retrieve with read_omitted_content if needed.",
+    descriptionFn: (i) => {
+      const name = typeof i["name"] === "string" ? ` "${i["name"]}"` : "";
+      return `Workflow script${name} omitted by condense. Retrieve with read_omitted_content if needed.`;
+    },
   },
   SendMessage: {
     kind: "omit",
     fields: ["message"],
-    description: "Inter-agent message omitted by condense. Retrieve with read_omitted_content if needed.",
+    descriptionFn: (i) => {
+      const to = typeof i["to"] === "string" ? ` (to: ${i["to"]})` : "";
+      return `Inter-agent message${to} omitted by condense. Retrieve with read_omitted_content if needed.`;
+    },
   },
   ReportFindings: {
     kind: "omit",
     fields: ["findings"],
-    description: "Report findings omitted by condense. Retrieve with read_omitted_content if needed.",
+    descriptionFn: (i) => {
+      const n = Array.isArray(i["findings"]) ? ` (${i["findings"].length} findings)` : "";
+      return `Report findings${n} omitted by condense. Retrieve with read_omitted_content if needed.`;
+    },
   },
   Bash: {
     kind: "truncate",
     field: "command",
     keep: 512,
-    description: "Bash command truncated by condense. Retrieve the full command with read_omitted_content if needed.",
+    descriptionFn: () =>
+      "Bash command truncated by condense. Retrieve the full command with read_omitted_content if needed.",
   },
 };
 
@@ -119,7 +145,7 @@ export function pruneToolInput(
     const contentId = allocateOmission(cache, sessionId, command);
     ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
     ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(
-      spec.description,
+      spec.descriptionFn(ti.input),
       command.length,
       contentId,
     );
@@ -130,7 +156,7 @@ export function pruneToolInput(
   const contentId = allocateOmission(cache, sessionId, combined);
   for (const f of spec.fields) ti.input[f] = "[Omitted by condense]";
   ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(
-    spec.description,
+    spec.descriptionFn(ti.input),
     combined.length,
     contentId,
   );

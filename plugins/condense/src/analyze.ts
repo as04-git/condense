@@ -334,13 +334,19 @@ export function runAnalyze(rows: TranscriptRow[], keepTurns: number) {
     const id = a.ref.startsWith("o:") || a.ref.startsWith("i:") ? a.ref.slice(2) : null;
     const sup = id ? superseded.get(id) : undefined;
     const age = n - 1 - a.turn;
+    // Task-notification results (agent outputs) are already summaries of
+    // expensive work — pruning a summary to retrieve it later is backwards.
+    // Default to likely-keep unless explicitly superseded.
+    const isTaskResult = a.kind === "tool-output" && /^<task-notification\b/.test(a.head);
     const tier: Tier = sup
       ? "prime-prune"
       : a.kind === "skill"
         ? "prime-prune"
-        : a.size < KEEP_SIZE
+        : isTaskResult
           ? "likely-keep"
-          : "review";
+          : a.size < KEEP_SIZE
+            ? "likely-keep"
+            : "review";
     // Superseded + skill dumps float to the top; then by size, then age.
     const pruneScore =
       (sup ? 1e9 : 0) + (a.kind === "skill" ? 5e8 : 0) + a.size + age * 100;
