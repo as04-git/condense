@@ -1,111 +1,120 @@
 # condense
 
-**Model-ranked, lossless-ish context condensation for Claude Code.**
+**Recoverable, model-ranked context condensation for Claude Code.**
 
-`condense` compacts your **current session** into a **new session you `/resume`
-into** — keeping every one of your messages and all of the model's prose
-verbatim, while aggressively pruning the bulky, recoverable stuff (tool outputs,
-large tool inputs, skill/command dumps) down to retrievable placeholders.
+`condense` moves bulky structured payloads out of the live context while preserving every genuine user message and every piece of assistant prose verbatim. Omitted tool I/O and injected material become typed, integrity-checked Content-IDs that can be searched or read in bounded pages. Signed thinking is either kept byte-identically or dropped whole under a fail-closed policy.
 
-It is a fork of [`claude-magic-compact`](https://github.com/aerovato/magic-compact),
-rebuilt around one idea: **don't spawn a second LLM to summarize.** The model
-already holding the conversation does the ranking itself, so condensation costs
-only a couple of tool calls instead of a full second agent pass.
+The result is a new Claude Code session that you `/resume` into. The parent session remains unchanged.
 
-## Why not just `/compact`?
+## Where it fits
 
-| | built-in `/compact` | `condense` |
+`condense` is a high-fidelity context pager, complementary to semantic `/compact`:
+
+| | `/compact` | `condense` |
 |---|---|---|
-| Reduces context | in place, seamless | into a new session you `/resume` |
-| What it keeps | a lossy LLM **summary** | your prose + model prose **verbatim** |
-| Tool outputs | discarded | pruned to **retrievable** Content-IDs |
-| Extra LLM cost | one summarization pass | **none** — the current model ranks in-context |
-| Reasoning (thinking) | discarded | keep-ranked or dropped (your choice) |
+| Semantic history | LLM summary | prose preserved verbatim |
+| Structured payloads | discarded | searchable Content-IDs |
+| Thinking | discarded | configurable; kept byte-identically or dropped whole |
+| Result | current session | new resumable session |
 
-The trade: condense can't rewrite the live window in place (only the built-in
-`/compact` can — that's an internal capability), so you take a manual `/resume`
-step. In exchange you get lossless, *recoverable* compaction with model judgment
-about what's worth keeping inline.
-
-## What gets kept vs. pruned
-
-- **Prose** — your typed/pasted messages and the model's visible text: **always
-  verbatim, never touched.**
-- **Attachments** (the large, recoverable stuff) — ranked, then kept inline or
-  pruned to a Content-ID:
-  - **tool outputs** (re-runnable), **big tool inputs** (`Write`/`Edit`/`Bash`/…
-    payloads — on disk + Content-ID), **skill/injected dumps** (re-invoke the skill
-    to reload).
-- **Thinking** (the model's prior reasoning) — `keep-all | keep-ranked | drop`.
-  Kept blocks are preserved byte-for-byte; dropped ones are gone (they're opaque
-  on disk — nothing readable to archive).
-
-Every condensed session opens with a deterministic **marker** stating exactly what
-was freshly pruned, what was already a placeholder from an earlier pass, and what
-is genuinely kept inline — so the resumed model never has to guess.
-
-## Recovering pruned content
-
-Anything pruned leaves a placeholder with a **Content-ID**. Retrieve the exact
-original bytes with the bundled MCP tool:
-
-```
-read_omitted_content(contentId: "…")
-```
-
-Skill dumps don't get a Content-ID by default — just re-invoke the skill
-(`/<skill>`) to reload it. The original, un-pruned session is also left untouched
-on disk; `/resume` it any time to see everything.
+Once protected prose dominates the context, analyze reports that floor so you can decide when semantic compaction is the better next step.
 
 ## Install
 
-Requires [`bun`](https://bun.sh) on your `PATH` (the CLI, MCP server, and hook all
-run `.ts` directly, no build step).
+Requires Bun on `PATH`.
 
 ```bash
-# register this repo as a local marketplace (updates can't clobber it)
 claude plugin marketplace add /path/to/condense
-
-# install the plugin
 claude plugin install condense@condense-local
-
-# optional: disable the upstream to avoid command overlap
-claude plugin disable claude-magic-compact@magic-compact
 ```
 
-Restart Claude Code so the `/condense` skill and the `read_omitted_content` MCP
-server register.
+Restart Claude Code after installation or update so the skill and MCP tools reload.
 
-## Usage
+## Use
 
+```text
+/condense [keepTurns] [--thinking=MODE] [--tools=MODE]
+                        [--agent-results=MODE] [--skills=MODE]
+                        [--injections=MODE]
 ```
-/condense [keepTurns] [--attachments=keep-all|keep-ranked|drop]
-                      [--thinking=keep-all|keep-ranked|drop]
+
+Modes are `keep-all`, `keep-ranked`, `drop-ranked`, and `drop-all`. The workflow is two mechanical calls: analyze produces candidates plus an opaque receipt; the current model ranks them; build validates the receipt and forks through the official Claude Agent SDK.
+
+Defaults:
+
+- thinking: `drop-ranked` (only explicitly selected thinking is removed);
+- ordinary tools: `keep-ranked`;
+- agent results: `drop-ranked`;
+- re-invokable skills: `drop-all`;
+- other injections: `keep-ranked`;
+- most recent real turn: fully untouched.
+
+The final visible marker reports actual reclaim, prompt-anchored thinking ranges, per-class inline/new/pre-omitted counts, lineage size, and recovery commands.
+
+## Configuration
+
+Configuration precedence is built-ins → global → nearest project config → invocation flags.
+
+- Global: `${XDG_CONFIG_HOME:-~/.config}/condense/config.json`
+- Project: nearest ancestor `.condense.json`
+
+Configuration is strict: unknown keys, invalid modes, and inconsistent limits abort rather than silently changing retention.
+
+```json
+{
+  "keepTurns": 1,
+  "policies": {
+    "thinking": "drop-ranked",
+    "tools": "keep-ranked",
+    "agentResults": "drop-ranked",
+    "skills": "drop-all",
+    "injections": "keep-ranked"
+  },
+  "retrieval": {
+    "defaultReadChars": 8000,
+    "maxReadChars": 50000,
+    "minQueryChars": 2,
+    "caseSensitive": false,
+    "defaultContextLines": 2,
+    "maxContextLines": 10,
+    "defaultMatches": 10,
+    "maxMatches": 50,
+    "maxExcerptChars": 4000,
+    "allowRegex": true,
+    "maxRegexPatternChars": 500
+  }
+}
 ```
 
-Defaults: `keepTurns=1`, `--attachments=keep-ranked`, `--thinking=keep-ranked`.
-Bare `/condense` = "keep my prose + reasoning, intelligently thin the tool
-outputs, leave the most recent turn fully intact." When it finishes it prints a
-new session id — `/resume` into it.
+`--attachments=MODE` remains as a deprecated alias for all recoverable classes; class-specific flags win.
 
-## How it works (two tool calls)
+## Recovery
 
-1. **`analyze`** — a mechanical pass over the transcript: per-turn / per-type size
-   breakdown plus ranked candidate lists (each attachment carries a short content
-   snippet so the model ranks by recognizing content, not guessing).
-2. *(the model ranks in-context — not a tool call)*
-3. **`build`** — writes the new compacted session: prose verbatim, kept thinking
-   byte-identical, pruned attachments → Content-IDs, one clean linear chain, a
-   fresh identity, and the closing marker.
+New typed stores live under `${XDG_DATA_HOME:-~/.local/share}/condense` with user-only permissions. Legacy `~/.claude/condense-store` caches remain readable.
 
-See [`CLAUDE.md`](./CLAUDE.md) for architecture and the invariants that keep
-`/resume` working.
+```text
+read_omitted_content(contentId, start?, length?)
+search_omitted_content(query, mode?, contentIds?, caseSensitive?, contextLines?, maxMatches?)
+```
 
-## Attribution & license
+A bare read returns a bounded first page with total length and `nextStart`. Search without `contentIds` uses the current condensed session’s exact structural lineage across repeated condensations. Supplying IDs searches exactly those objects. `mode: "regex"` uses the linear-time RE2 subset; literal is the default.
 
-Fork of [`claude-magic-compact`](https://github.com/aerovato/magic-compact) by
-Kevin Liao @ Aerovato Research — the transcript-surgery, omission-store, and
-MCP-retrieval machinery originate there. That project is **BSD 3-Clause**
-licensed; this fork retains that license and adds the fork's modifications under
-the same terms. See [`LICENSE.md`](./LICENSE.md) (both copyright notices
-retained per the BSD-3 terms).
+Structured values are preserved as exact JSON values and rendered deterministically for paging/search. They are not claimed to reproduce incidental whitespace from the original JSONL serialization.
+
+## Development and QA
+
+```bash
+cd plugins/condense
+bun install
+bun run typecheck
+bun test
+bun run test:integration
+```
+
+The default suite uses minimized synthetic fixtures. Integration tests create disposable synthetic Claude sessions and exercise the real SDK fork, signature preservation, parent chains, titles, repeated condensation, and lineage retrieval.
+
+## Ancestry and license
+
+`condense` is an independently evolved context-paging plugin derived in part from [`claude-magic-compact`](https://github.com/aerovato/magic-compact). It retains and substantially adapts portions of that project’s transcript, omission-store, and MCP machinery while replacing its spawned summarizer with in-session retention ranking.
+
+Both projects use the BSD 3-Clause license. Both copyright notices are retained in [LICENSE.md](./LICENSE.md).

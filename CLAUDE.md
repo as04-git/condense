@@ -1,121 +1,54 @@
 # CLAUDE.md — `condense`
 
-Guidance for Claude Code sessions working on this repository.
+## Purpose
 
-## What this is
+`condense` is a Claude Code context-paging plugin. It forks the current session through the official Claude Agent SDK, preserves all genuine user/assistant prose, keeps signed thinking byte-identical or drops it whole, and externalizes selected structured payloads to typed Content-IDs.
 
-`condense` is a Claude Code plugin that losslessly compacts the **current
-session** into a **new session you `/resume` into**. Unlike the built-in
-`/compact` (lossy LLM summary, in place) and unlike its ancestor
-`claude-magic-compact` (spawns a second `claude -p` agent to summarize), condense
-does the compaction **in-session with no second LLM**: the model already holding
-the conversation ranks what to keep, keeps all prose verbatim, and prunes
-recoverable "attachments" to retrievable Content-IDs.
+It is derived in part from `claude-magic-compact`, but its retention protocol, in-session ranking, SDK fork architecture, lineage search, typed storage, and deterministic marker are independently evolved.
 
-It is a **fork of `claude-magic-compact`** (kevinMEH / aerovato). The reusable
-transcript-surgery + omission-store + MCP-retrieval machinery came from there;
-the LLM-spawn summarizer was ripped out and replaced with in-session ranking.
+## Protocol
 
-## The data flow (two tool calls, no more)
+The skill performs exactly two CLI calls:
 
-1. `bun src/condense.ts analyze [keepTurns]` — mechanical stats pass. Auto-locates
-   the current transcript via `$CLAUDE_CODE_SESSION_ID`. Emits per-turn / per-type
-   breakdown + ranked candidate lists (attachments with ~140-char anchor snippets,
-   thinking blocks). **The model reads this and ranks in-context** — that is the
-   only "intelligence" step, and it is not a tool call.
-2. `bun src/condense.ts build '<ranking-json>'` — mechanical build. Takes the
-   model's keep-decision, writes a new compacted session, prints the new
-   `sessionId` + `/resume` hint.
+1. `condense.ts analyze`: loads strict global/project/invocation config, identifies the current `/condense` operation once, excludes it and old markers from semantic turns, and emits candidates plus an opaque receipt.
+2. `condense.ts build`: accepts `{receipt, keep, drop, title?}`, recomputes source/candidate hashes, rejects drift or malformed decisions, forks to the sealed cutoff, applies retention, publishes the store/manifest, then atomically publishes the final transcript.
 
-The skill (`skills/condense/SKILL.md`) orchestrates: analyze → rank → build.
+Retention classes are thinking, tools, agent results, skills, and injections. Modes are `keep-all`, `keep-ranked`, `drop-ranked`, and `drop-all`. Thinking and agent results default to explicit drop; recoverable tools/injections default to explicit keep.
 
-## The build architecture: SDK fork + our post-pass
+## Non-negotiable invariants
 
-`runBuild` is **fork-then-post-pass**. The clone half is delegated to the
-official **`@anthropic-ai/claude-agent-sdk`** (`forkSession`) — the maintained
-layer over Claude Code's version-fragile on-disk format. We do NOT hand-roll
-identity/chain surgery anymore; letting the SDK own it means format churn is
-Anthropic's problem. `forkSession`:
-- mints a fresh sessionId, remaps every ROW uuid (tool_use ids untouched),
-  re-chains parentUuid, drops `last-prompt` / `ai-title` / file-history,
-- stamps `forkedFrom.{sessionId,messageUuid}` on every row (our old→new map),
-- preserves thinking signatures byte-identically,
-- `upToMessageId` slices inclusively (our op-turn strip).
+- Thinking blocks are byte-identical or removed whole. Never edit signed thinking.
+- Genuine user messages and assistant text are verbatim.
+- `isMeta === true` plus structured/list content remains the injected-content discriminator.
+- Analyze identifies the newest operation turn once; build uses the receipt cutoff and never scans backward deleting matching real turns.
+- Kept recent turns are content-untouched.
+- Every decision-dependent fork row must carry `forkedFrom.messageUuid`; SDK drift fails closed.
+- Both `custom-title` and `agent-name` rows are emitted for the new session.
+- Multi-leaf SDK output is tolerated. The marker is parented to the mapped cutoff or nearest surviving ancestor and has the newest timestamp.
+- Prior markers are removed. Marker rows never participate in semantic turns, prompt anchors, or titles.
+- New stores contain typed exact JSON values, SHA-256 hashes, and useful provenance. Legacy string stores are read-only compatible.
+- Store/manifest files publish before the transcript; a crash may orphan data but may not publish broken placeholders.
+- Lineage manifests collect only IDs in condense-owned structured placeholder locations, never ID-shaped prose.
 
-Our **post-pass** (`build.ts`) then owns everything content-level, which the SDK
-deliberately doesn't touch: prune attachments/thinking to Content-IDs, write the
-title pair, append the marker. Refs from the ranking are keyed by ORIGINAL uuids;
-each forked row carries its original uuid in `forkedFrom.messageUuid`, so we map
-`s:`/thinking refs through it (`o:`/`i:` use the unchanged `tool_use_id`).
+## Storage and retrieval
 
-## Invariants — DO NOT BREAK THESE (each was a real bug)
+- New data: `${XDG_DATA_HOME:-~/.local/share}/condense/{sessions,manifests}`.
+- Legacy reads: `~/.claude/condense-store`.
+- Directories are `0700`; files are `0600`; malformed data, hash failures, and ambiguous short-ID suffixes are errors.
+- `read_omitted_content` is always bounded unless an explicit allowed length is supplied.
+- `search_omitted_content` is literal by default and current-lineage scoped when IDs are omitted. Regex is explicit and uses pinned RE2JS.
 
-- **Thinking blocks are byte-identical or dropped — never edited.** They carry an
-  encrypted `signature`; a kept block must round-trip its exact bytes or `/resume`
-  400s. You may keep a whole block or drop it; you may never modify one. (The SDK
-  fork preserves signatures; our post-pass only ever removes whole blocks.)
-- **Prose is always verbatim.** Assistant text blocks and genuine user messages
-  (string-content rows) are never pruned, summarized, or touched. Only tool I/O,
-  thinking, and injected/skill dumps are rankable.
-- **`isMeta === true` is the injected-content discriminator.** Genuine user
-  messages are never `isMeta`; skill dumps / command output / system injections are.
-  A user row with *string* content is always real prose (protects the visible
-  marker); *list* content over the floor is injected → rankable.
-- **Title = both `custom-title` AND `agent-name` rows.** The picker/tab read
-  `custom-title`; the in-app banner pill reads `agent-name`. `forkSession` writes
-  NEITHER reliably (ignores its `title` param when `upToMessageId` is set), so we
-  own the title: strip any inherited/derived title rows and emit a fresh pair via
-  `makeTitleRows`, keyed to the new id. `last-prompt` desync is handled *by the
-  SDK* (it drops the row) — we don't re-add it.
-- **Multi-leaf is tolerated — do NOT re-add linearization.** The SDK fork (and
-  CC's own `/branch`) leave interrupt-artifact leaves in place; we mirror that.
-  The marker carries the newest timestamp, so it's the resolved leaf regardless.
-  (We tried enforcing a single leaf; it diverged from official behavior for no
-  benefit.)
-- **The closing marker is the last row, visible, singleton, deterministic.** It is
-  built purely from build-step tallies (never an LLM summary) and reports three
-  buckets: freshly-pruned / already-pre-pruned / genuinely-kept. Prior markers are
-  stripped each generation (`condenseMarker: true` sentinel) so they don't compound.
-- **Only appended rows get sessionId-stamped by us.** CC resolves metadata by
-  `map.get(leafMessage.sessionId)`; the SDK already stamps every forked row, so the
-  post-pass only sets sessionId on the title/marker rows it appends.
-- **Generation counter** is read as the `max` across the source's RAW title rows
-  (they're minimal meta rows with no uuid — read them raw, `readTranscriptRows`
-  filters them out), backed by a durable `condenseGeneration` field (title-text
-  regex is the fallback).
+## Development
 
-## Files
+Runtime is Bun. Before delivery run:
 
-| File | Role |
-|---|---|
-| `src/condense.ts` | 2-call CLI dispatcher (`analyze` / `build`); auto-locates transcript |
-| `src/analyze.ts` | Mechanical stats + ranked candidate lists with anchors |
-| `src/build.ts` | The build layer: fork orchestration + prune/title/marker post-pass |
-| `src/fork.ts` | Thin wrapper over the SDK's `forkSession` (the clone half) |
-| `src/transcript.ts` | Active-chain reconstruction, turn building, row readers/writer |
-| `src/prune.ts` | Attachment candidacy + pruning to Content-IDs; injected/skill detection |
-| `src/omission.ts` | The Content-ID store (`~/.claude/condense-store/`) read/write |
-| `src/mcp.ts` | `read_omitted_content` MCP server (the retrieval half) |
-| `skills/condense/SKILL.md` | The orchestration the model follows on `/condense` |
+```bash
+bun run typecheck
+bun test
+bun run test:integration
+claude plugin validate .
+```
 
-## Working on this codebase
+Then update `condense@condense-local`, launch a fresh Claude process, resume a disposable condensed session, and verify title/banner, marker, bounded read, literal/regex lineage search, and repeated condensation.
 
-- **Runtime is `bun`** (no build/compile step — `.ts` runs directly). MCP + hook
-  entrypoints are `bun src/*.ts`.
-- **Testing = fork a throwaway session, then verify.** Copy a real session to a
-  throwaway UUID under `~/.claude/projects/<proj>/`, run `runAnalyze`/`runBuild`
-  against it, then delete both it and the fork. Load-bearing checks: (1) a real
-  `claude -p --resume` round-trip returns without a signature 400; (2) kept
-  thinking signatures byte-identical to source; (3) assistant-prose char count
-  matches source (minus the stripped op-turn); (4) zero dangling `parentUuid`,
-  marker is the newest-timestamp leaf; (5) generation increments + desc carries
-  forward across a re-condense.
-- **Headless verification is strong on data fidelity, weak on UI.** Several bugs
-  here (stale banner, picker desync, multi-leaf) passed every content-level test and
-  only showed in the interactive UI. When something touches session identity/title,
-  the real confirmation is an interactive resume, not a headless check.
-- **CC session semantics are confirmed against the v2.1.88 source** (the
-  `collection-claude-code-source-code` de-minified TypeScript). When in doubt about
-  how CC resolves a title/leaf/metadata row, check the source rather than infer.
-- **Never use the injected billing/active-session email for commits.** Author is
-  Aryan Shrivastava <48136120+as04-git@users.noreply.github.com>.
+Never commit private real-session fixtures. Commit only minimized synthetic fixtures. Commit author, if requested, is Aryan Shrivastava <48136120+as04-git@users.noreply.github.com>.
