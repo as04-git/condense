@@ -24,6 +24,15 @@ export type ForkResult = {
   oldToNew: Map<string, string>;
 };
 
+export function assertForkLineage(rows: TranscriptRow[]): void {
+  for (const row of rows) {
+    const forkedFrom = row["forkedFrom"];
+    if (!isRecord(forkedFrom) || typeof forkedFrom["messageUuid"] !== "string") {
+      throw new Error(`SDK fork row ${row.uuid} is missing forkedFrom.messageUuid`);
+    }
+  }
+}
+
 // Fork `sourcePath`'s session via the SDK and load the result. `upToMessageId`
 // (an ORIGINAL row uuid) slices the fork inclusively; `title` sets custom-title.
 export async function forkForCondense(
@@ -39,6 +48,7 @@ export async function forkForCondense(
   });
   const transcriptPath = join(dirname(sourcePath), `${sessionId}.jsonl`);
   const rows = await readTranscriptRows(transcriptPath);
+  assertForkLineage(rows);
 
   const oldToNew = new Map<string, string>();
   for (const r of rows) {

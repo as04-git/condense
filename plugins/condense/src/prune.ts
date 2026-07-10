@@ -140,7 +140,10 @@ export function pruneToolInput(
 
   if (spec.kind === "truncate") {
     const command = stringifyContent(ti.input[spec.field]);
-    const contentId = allocateOmission(cache, sessionId, command);
+    const contentId = allocateOmission(cache, sessionId, command, {
+      kind: "tool-input",
+      metadata: { toolName: ti.name, field: spec.field },
+    });
     ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
     ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(
       desc,
@@ -150,8 +153,18 @@ export function pruneToolInput(
     return size;
   }
 
+  const fields = Object.fromEntries(spec.fields.map((field) => [field, ti.input[field]]));
   const combined = spec.fields.map((f) => stringifyContent(ti.input[f])).join("\n");
-  const contentId = allocateOmission(cache, sessionId, combined);
+  const contentId = allocateOmission(cache, sessionId, fields, {
+    kind: "tool-input",
+    metadata: {
+      toolName: ti.name,
+      fields: [...spec.fields],
+      path: typeof (ti.input["file_path"] ?? ti.input["notebook_path"]) === "string"
+        ? ti.input["file_path"] ?? ti.input["notebook_path"]
+        : undefined,
+    },
+  });
   for (const f of spec.fields) ti.input[f] = "[Omitted by condense]";
   ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(
     desc,
@@ -219,6 +232,6 @@ export function injectedInfo(
     .join("\n");
   if (text.length < INJECT_FLOOR_CHARS) return null;
   const m = text.match(SKILL_MARKER);
-  const skill = m ? (m[1].trim().split("/").filter(Boolean).pop() ?? null) : null;
+  const skill = m?.[1] ? (m[1].trim().split("/").filter(Boolean).pop() ?? null) : null;
   return { size: text.length, skill };
 }

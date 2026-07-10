@@ -13,7 +13,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runAnalyze } from "./analyze";
 import { runBuild } from "./build";
-import { readActiveTranscriptRows } from "./transcript";
+import { loadConfig, RETENTION_MODES, type ConfigOverrides, type PolicyClass, type RetentionMode } from "./config";
+import { findCondenseOperationBoundary, readActiveTranscriptRows } from "./transcript";
 
 function locateTranscript(): string {
   const sid = process.env["CLAUDE_CODE_SESSION_ID"];
@@ -46,7 +47,7 @@ function locateTranscript(): string {
       `condense: WARNING — ${matches.length} transcripts match session ${sid}; using newest:\n  ${matches.join("\n  ")}`,
     );
   }
-  return matches[0];
+  return matches[0]!;
 }
 
 async function readStdin(): Promise<string> {
@@ -60,16 +61,13 @@ async function main(): Promise<void> {
   const transcript = locateTranscript();
 
   if (cmd === "analyze") {
-    let keepTurns = 1;
-    if (rest[0] !== undefined) {
-      const n = Number(rest[0]);
-      if (!Number.isFinite(n) || n < 0) {
-        throw new Error(`invalid keepTurns "${rest[0]}" — must be a non-negative number.`);
-      }
-      keepTurns = Math.floor(n);
-    }
     const rows = await readActiveTranscriptRows(transcript);
-    console.log(JSON.stringify(runAnalyze(rows, keepTurns)));
+    const boundary = findCondenseOperationBoundary(rows);
+    const cutoff = rows.find((row) => row.uuid === boundary.cutoffUuid);
+    const cwd = typeof cutoff?.["cwd"] === "string" ? cutoff["cwd"] : process.cwd();
+    const config = await loadConfig(cwd, parseAnalyzeArgs(rest));
+    const sessionId = process.env["CLAUDE_CODE_SESSION_ID"] ?? "";
+    console.log(JSON.stringify(runAnalyze(rows, config, { sessionId, cutoffUuid: boundary.cutoffUuid })));
     return;
   }
 
@@ -85,6 +83,37 @@ async function main(): Promise<void> {
 
   console.error("usage: bun condense.ts <analyze [keepTurns] | build '<ranking-json>'>");
   process.exit(2);
+}
+
+function parseAnalyzeArgs(args: string[]): ConfigOverrides {
+  const result: ConfigOverrides = { policies: {} };
+  let positionalSeen = false;
+  const explicit: Partial<Record<PolicyClass, RetentionMode>> = {};
+  let attachments: RetentionMode | undefined;
+  for (const arg of args) {
+    if (!arg.startsWith("--")) {
+      if (positionalSeen) throw new Error(`unexpected analyze argument "${arg}"`);
+      const value = Number(arg);
+      if (!Number.isInteger(value) || value < 0) throw new Error(`invalid keepTurns "${arg}"`);
+      result.keepTurns = value; positionalSeen = true; continue;
+    }
+    const match = arg.match(/^--([a-z-]+)=(.+)$/);
+    if (!match) throw new Error(`invalid option "${arg}"; expected --name=value`);
+    const name = match[1]!;
+    const rawValue = match[2]!;
+    const value = rawValue as RetentionMode;
+    if (!(RETENTION_MODES as readonly string[]).includes(value)) throw new Error(`invalid retention mode "${match[2]}"`);
+    const names: Record<string, PolicyClass> = { thinking: "thinking", tools: "tools", "agent-results": "agentResults", skills: "skills", injections: "injections" };
+    if (name === "attachments") attachments = value;
+    else {
+      const policyClass = names[name];
+      if (policyClass) explicit[policyClass] = value;
+      else throw new Error(`unknown option --${name}`);
+    }
+  }
+  if (attachments) for (const key of ["tools", "agentResults", "skills", "injections"] as PolicyClass[]) result.policies![key] = attachments;
+  Object.assign(result.policies!, explicit);
+  return result;
 }
 
 main().catch((err) => {
