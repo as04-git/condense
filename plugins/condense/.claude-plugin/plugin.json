@@ -1,7 +1,7 @@
 {
   "name": "condense",
-  "version": "0.1.0",
-  "description": "In-session, model-ranked lossless context condensation for Claude Code. Forked from claude-magic-compact; replaces the spawned-agent prose summarizer with in-session ranking of tool outputs and thinking.",
+  "version": "0.2.0",
+  "description": "Recoverable, model-ranked context condensation for Claude Code, derived in part from claude-magic-compact.",
   "author": {
     "name": "Aryan Shrivastava"
   }
