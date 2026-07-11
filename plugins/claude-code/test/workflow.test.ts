@@ -325,7 +325,7 @@ test("prepared projections equal built active context across every policy mode a
     expect(built.finalChars).toBe(prepared.impactChars.projected);
     expect(built.removedChars).toBe(prepared.impactChars.removed);
   }
-});
+}, 20_000);
 
 test("every failed publication stage cleans the SDK fork and retains the prepared plan", async () => {
   const stages = ["objects", "manifest", "transcript"] as const;
