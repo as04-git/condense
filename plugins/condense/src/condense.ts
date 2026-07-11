@@ -10,7 +10,7 @@ async function readStdin(): Promise<string> {
 }
 
 async function jsonArgument(rest: string[], command: string): Promise<unknown> {
-  const raw = rest[0] ?? await readStdin();
+  const raw = rest[0] ?? (await readStdin());
   if (!raw.trim()) throw new Error(`${command} requires a JSON request as its first argument or on stdin`);
   try {
     return JSON.parse(raw);
@@ -37,13 +37,22 @@ function parseAnalyzeArgs(args: string[]): ConfigOverrides {
     if (!match) throw new Error(`invalid option "${argument}"; expected --name=value`);
     const name = match[1]!;
     const value = match[2] as RetentionMode;
-    if (!(RETENTION_MODES as readonly string[]).includes(value)) throw new Error(`invalid retention mode "${match[2]}"`);
-    const names: Record<string, PolicyClass> = { thinking: "thinking", tools: "tools", "agent-results": "agentResults", skills: "skills", injections: "injections" };
+    if (!(RETENTION_MODES as readonly string[]).includes(value))
+      throw new Error(`invalid retention mode "${match[2]}"`);
+    const names: Record<string, PolicyClass> = {
+      thinking: "thinking",
+      tools: "tools",
+      "agent-results": "agentResults",
+      skills: "skills",
+      injections: "injections",
+    };
     if (name === "attachments") attachments = value;
     else if (names[name]) explicit[names[name]!] = value;
     else throw new Error(`unknown option --${name}`);
   }
-  if (attachments) for (const key of ["tools", "agentResults", "skills", "injections"] as PolicyClass[]) result.policies![key] = attachments;
+  if (attachments)
+    for (const key of ["tools", "agentResults", "skills", "injections"] as PolicyClass[])
+      result.policies![key] = attachments;
   Object.assign(result.policies!, explicit);
   return result;
 }

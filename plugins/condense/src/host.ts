@@ -12,7 +12,7 @@ export type TokenProjection = {
 };
 
 export type SessionIdentity = {
-  host: "claude-code";
+  host: "claude-code" | "codex";
   sessionId: string;
   transcriptPath: string;
   projectCwd: string;

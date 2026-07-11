@@ -17,7 +17,7 @@ The result is a new Claude Code session that you `/resume` into. The parent sess
 | Thinking | discarded | configurable; kept byte-identically or dropped whole |
 | Result | current session | new resumable session |
 
-Once protected prose dominates the context, analyze reports that floor so you can decide when semantic compaction is the better next step.
+Once protected prose dominates the context, the exact dry run makes that boundary visible without pretending that a generic tokenizer can measure it reliably.
 
 ## Install
 
@@ -38,7 +38,18 @@ Restart Claude Code after installation or update so the skill and MCP tools relo
                         [--injections=MODE]
 ```
 
-Modes are `keep-all`, `keep-ranked`, `drop-ranked`, and `drop-all`. The workflow is two mechanical calls: analyze produces candidates plus an opaque receipt; the current model ranks them; build validates the receipt and forks through the official Claude Agent SDK.
+Modes are `keep-all`, `keep-ranked`, `drop-ranked`, and `drop-all`. The host-neutral workflow is:
+
+```text
+analyze → inspect zero or more times → prepare → build
+```
+
+- `analyze` returns a bounded, columnar evidence page and an opaque `cr_` receipt. It deliberately has no headline projection, token estimate, or global optimization target.
+- `inspect` paginates hidden candidates or expands at most 20 selected refs with bounded, type-aware evidence.
+- `prepare` freezes the decisions, assigns the real omission IDs, and runs the exact dry run. Its neutral audit presents irreversible effects before character impact.
+- `build` accepts only the resulting `bp_` plan handle and commits exactly the prepared plan through the official Claude Agent SDK.
+
+Analysis and plan records are private, expire after 24 hours, and are consumed after a successful build. Source and active-context digests are revalidated at every stage.
 
 Defaults:
 
@@ -49,7 +60,7 @@ Defaults:
 - other injections: `keep-ranked`;
 - most recent real turn: fully untouched.
 
-The final visible marker reports actual reclaim, prompt-anchored thinking ranges, per-class inline/new/pre-omitted counts, lineage size, and recovery commands.
+The final visible marker reports actual character reclaim, prompt-anchored thinking ranges, per-class inline/new/pre-omitted counts, lineage size, and recovery commands. Condense does not emit heuristic token counts. A future host adapter may add token projection only when source and projected counts come from the same trustworthy model-specific method and scope.
 
 ## Configuration
 
@@ -70,6 +81,9 @@ Configuration is strict: unknown keys, invalid modes, and inconsistent limits ab
     "skills": "drop-all",
     "injections": "keep-ranked"
   },
+  "analysis": {
+    "maxPageChars": 12000
+  },
   "retrieval": {
     "defaultReadChars": 8000,
     "maxReadChars": 50000,
@@ -81,7 +95,8 @@ Configuration is strict: unknown keys, invalid modes, and inconsistent limits ab
     "maxMatches": 50,
     "maxExcerptChars": 4000,
     "allowRegex": true,
-    "maxRegexPatternChars": 500
+    "maxRegexPatternChars": 500,
+    "maxResponseChars": 50000
   }
 }
 ```
@@ -90,7 +105,7 @@ Configuration is strict: unknown keys, invalid modes, and inconsistent limits ab
 
 ## Recovery
 
-New typed stores live under `${XDG_DATA_HOME:-~/.local/share}/condense` with user-only permissions. Legacy `~/.claude/condense-store` caches remain readable.
+New v3 objects live under `${XDG_DATA_HOME:-~/.local/share}/condense/objects` as directly addressable, sharded Content-IDs with user-only permissions. Their integrity hash covers the complete canonical envelope. Legacy v1/v2 `~/.claude/condense-store` caches and manifests remain read-only compatible.
 
 ```text
 read_omitted_content(contentId, start?, length?)
@@ -105,13 +120,22 @@ Structured values are preserved as exact JSON values and rendered deterministica
 
 ```bash
 cd plugins/condense
-bun install
+bun install --frozen-lockfile
+bun run check
 bun run typecheck
 bun test
 bun run test:integration
 ```
 
 The default suite uses minimized synthetic fixtures. Integration tests create disposable synthetic Claude sessions and exercise the real SDK fork, signature preservation, parent chains, titles, repeated condensation, and lineage retrieval.
+
+An authenticated resume check is intentionally opt-in and never runs in CI. Point it at a disposable-capable real transcript containing at least one eligible payload; the harness copies it to throwaway session IDs and removes the fixture, child, and private store afterward:
+
+```bash
+CONDENSE_SMOKE_SOURCE_TRANSCRIPT=/absolute/path/to/session.jsonl \
+CONDENSE_SMOKE_PROJECT_CWD=/absolute/project/cwd \
+bun run test:smoke
+```
 
 ## Ancestry and license
 

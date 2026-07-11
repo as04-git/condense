@@ -124,11 +124,7 @@ export function bigInputSize(block: unknown): number {
 // Force-prune a tool_use block's big input to a retrievable Content-ID. Returns
 // the pruned size, or 0 if the block was not a prunable candidate. No threshold
 // governs the decision here — the caller already ranked this input for removal.
-export function pruneToolInput(
-  block: JsonRecord,
-  cache: OmissionCache,
-  sessionId: string,
-): number {
+export function pruneToolInput(block: JsonRecord, cache: OmissionCache, sessionId: string): number {
   const ti = toolInput(block);
   if (!ti) return 0;
   const spec = INPUT_SPECS[ti.name];
@@ -145,11 +141,7 @@ export function pruneToolInput(
       metadata: { toolName: ti.name, field: spec.field },
     });
     ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
-    ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(
-      desc,
-      command.length,
-      contentId,
-    );
+    ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(desc, command.length, contentId);
     return size;
   }
 
@@ -160,21 +152,21 @@ export function pruneToolInput(
     metadata: {
       toolName: ti.name,
       fields: [...spec.fields],
-      path: typeof (ti.input["file_path"] ?? ti.input["notebook_path"]) === "string"
-        ? ti.input["file_path"] ?? ti.input["notebook_path"]
-        : undefined,
+      path:
+        typeof (ti.input["file_path"] ?? ti.input["notebook_path"]) === "string"
+          ? (ti.input["file_path"] ?? ti.input["notebook_path"])
+          : undefined,
     },
   });
   for (const f of spec.fields) ti.input[f] = "[Omitted by condense]";
-  ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(
-    desc,
-    combined.length,
-    contentId,
-  );
+  ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(desc, combined.length, contentId);
   return size;
 }
 
-export function pruneToolInputWithId(block: JsonRecord, contentId: string): { size: number; value: unknown; kind: "tool-input"; metadata: Record<string, unknown> } | null {
+export function pruneToolInputWithId(
+  block: JsonRecord,
+  contentId: string,
+): { size: number; value: unknown; kind: "tool-input"; metadata: Record<string, unknown> } | null {
   const ti = toolInput(block);
   if (!ti) return null;
   const spec = INPUT_SPECS[ti.name];
@@ -191,7 +183,12 @@ export function pruneToolInputWithId(block: JsonRecord, contentId: string): { si
   const fields = Object.fromEntries(spec.fields.map((field) => [field, ti.input[field]]));
   for (const field of spec.fields) ti.input[field] = "[Omitted by condense]";
   ti.input[`${spec.fields.join("_")}_omission_notice`] = omissionNotice(description, size, contentId);
-  return { size, value: fields, kind: "tool-input", metadata: { toolName: ti.name, fields: [...spec.fields], path: ti.input["file_path"] ?? ti.input["notebook_path"] } };
+  return {
+    size,
+    value: fields,
+    kind: "tool-input",
+    metadata: { toolName: ti.name, fields: [...spec.fields], path: ti.input["file_path"] ?? ti.input["notebook_path"] },
+  };
 }
 
 function stringifyContent(content: unknown): string {
@@ -235,9 +232,7 @@ const INJECT_FLOOR_CHARS = 4000;
 // Capture the rest of the line (not just non-space) so paths with spaces work.
 const SKILL_MARKER = /^Base directory for this skill:\s*(.+)/;
 
-export function injectedInfo(
-  row: unknown,
-): { size: number; skill: string | null } | null {
+export function injectedInfo(row: unknown): { size: number; skill: string | null } | null {
   if (!isRecord(row) || row["type"] !== "user") return null;
   if (row["isMeta"] !== true) return null; // genuine user prose is never isMeta
   const msg = row["message"];

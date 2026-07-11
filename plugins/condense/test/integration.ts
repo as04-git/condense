@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { ClaudeCodeAdapter } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG } from "../src/config";
-import { loadManifest, searchOmittedContent } from "../src/omission";
+import {
+  allocateOmission,
+  createEmptyCache,
+  loadManifest,
+  saveOmissionCache,
+  searchOmittedContent,
+} from "../src/omission";
 import { isRecord, readTranscriptRows, type JsonRecord } from "../src/transcript";
 import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
 
@@ -17,9 +23,15 @@ const dataDirPromise = mkdtemp("/tmp/condense-integration-data-");
 const createdSessions = new Set<string>();
 const adapter = new ClaudeCodeAdapter();
 let tick = Date.now() - 100000;
-const timestamp = () => new Date(tick += 1000).toISOString();
+const timestamp = () => new Date((tick += 1000)).toISOString();
 
-function messageRow(sessionId: string, type: "user" | "assistant" | "system", parentUuid: string | null, content: unknown, extra: JsonRecord = {}): JsonRecord {
+function messageRow(
+  sessionId: string,
+  type: "user" | "assistant" | "system",
+  parentUuid: string | null,
+  content: unknown,
+  extra: JsonRecord = {},
+): JsonRecord {
   return {
     type,
     uuid: randomUUID(),
@@ -27,15 +39,32 @@ function messageRow(sessionId: string, type: "user" | "assistant" | "system", pa
     sessionId,
     timestamp: timestamp(),
     cwd: projectCwd,
-    message: { role: type === "assistant" ? "assistant" : "user", content, ...(type === "assistant" ? { id: `msg_${randomUUID()}`, model: "claude-test" } : {}) },
+    message: {
+      role: type === "assistant" ? "assistant" : "user",
+      content,
+      ...(type === "assistant" ? { id: `msg_${randomUUID()}`, model: "claude-test" } : {}),
+    },
     ...extra,
   };
 }
 
 function operationRows(sessionId: string, parentUuid: string): JsonRecord[] {
   const operation = messageRow(sessionId, "user", parentUuid, "/condense");
-  const skill = messageRow(sessionId, "user", operation["uuid"] as string, [{ type: "text", text: "Base directory for this skill: /tmp/plugin/skills/condense" }], { isMeta: true });
-  const call = messageRow(sessionId, "assistant", skill["uuid"] as string, [{ type: "tool_use", id: `toolu_${randomUUID()}`, name: "Bash", input: { command: "bun /tmp/plugin/condense/src/condense.ts analyze" } }]);
+  const skill = messageRow(
+    sessionId,
+    "user",
+    operation["uuid"] as string,
+    [{ type: "text", text: "Base directory for this skill: /tmp/plugin/skills/condense" }],
+    { isMeta: true },
+  );
+  const call = messageRow(sessionId, "assistant", skill["uuid"] as string, [
+    {
+      type: "tool_use",
+      id: `toolu_${randomUUID()}`,
+      name: "Bash",
+      input: { command: "bun /tmp/plugin/condense/src/condense.ts analyze" },
+    },
+  ]);
   return [operation, skill, call];
 }
 
@@ -44,14 +73,26 @@ async function writeRows(path: string, rows: JsonRecord[]): Promise<void> {
 }
 
 async function rawRows(path: string): Promise<JsonRecord[]> {
-  return (await readFile(path, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return (await readFile(path, "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 async function analyzePrepareBuild(path: string) {
-  const sessionId = path.split("/").at(-1)!.replace(/\.jsonl$/, "");
+  const sessionId = path
+    .split("/")
+    .at(-1)!
+    .replace(/\.jsonl$/, "");
   process.env["CLAUDE_CODE_SESSION_ID"] = sessionId;
   process.env["CLAUDE_PROJECT_DIR"] = projectCwd;
-  const config = { ...DEFAULT_CONFIG, keepTurns: 1, policies: { ...DEFAULT_CONFIG.policies }, analysis: { ...DEFAULT_CONFIG.analysis }, retrieval: { ...DEFAULT_CONFIG.retrieval } };
+  const config = {
+    ...DEFAULT_CONFIG,
+    keepTurns: 1,
+    policies: { ...DEFAULT_CONFIG.policies },
+    analysis: { ...DEFAULT_CONFIG.analysis },
+    retrieval: { ...DEFAULT_CONFIG.retrieval },
+  };
   const analysis = await analyzeCurrentSession(adapter, config);
   expect(JSON.stringify(analysis).length).toBeLessThanOrEqual(config.analysis.maxPageChars);
   expect(analysis).not.toHaveProperty("projection");
@@ -67,12 +108,28 @@ async function appendGeneration(path: string, keyword: string): Promise<void> {
   const marker = [...rows].reverse().find((row) => row["condenseMarker"] === true)!;
   const sessionId = String(marker["sessionId"]);
   const user = messageRow(sessionId, "user", marker["uuid"] as string, `generate ${keyword}`);
-  const use = messageRow(sessionId, "assistant", user["uuid"] as string, [{ type: "tool_use", id: `toolu_${keyword}`, name: "Bash", input: { command: `emit ${keyword}` } }]);
-  const result = messageRow(sessionId, "user", use["uuid"] as string, [{ type: "tool_result", tool_use_id: `toolu_${keyword}`, content: `${keyword}\n${"x".repeat(1300)}` }]);
-  const close = messageRow(sessionId, "assistant", result["uuid"] as string, [{ type: "text", text: `recorded ${keyword}` }]);
+  const use = messageRow(sessionId, "assistant", user["uuid"] as string, [
+    { type: "tool_use", id: `toolu_${keyword}`, name: "Bash", input: { command: `emit ${keyword}` } },
+  ]);
+  const result = messageRow(sessionId, "user", use["uuid"] as string, [
+    { type: "tool_result", tool_use_id: `toolu_${keyword}`, content: `${keyword}\n${"x".repeat(1300)}` },
+  ]);
+  const close = messageRow(sessionId, "assistant", result["uuid"] as string, [
+    { type: "text", text: `recorded ${keyword}` },
+  ]);
   const finalUser = messageRow(sessionId, "user", close["uuid"] as string, `continue after ${keyword}`);
-  const finalAssistant = messageRow(sessionId, "assistant", finalUser["uuid"] as string, [{ type: "text", text: `ready after ${keyword}` }]);
-  rows.push(user, use, result, close, finalUser, finalAssistant, ...operationRows(sessionId, finalAssistant["uuid"] as string));
+  const finalAssistant = messageRow(sessionId, "assistant", finalUser["uuid"] as string, [
+    { type: "text", text: `ready after ${keyword}` },
+  ]);
+  rows.push(
+    user,
+    use,
+    result,
+    close,
+    finalUser,
+    finalAssistant,
+    ...operationRows(sessionId, finalAssistant["uuid"] as string),
+  );
   await writeRows(path, rows);
 }
 
@@ -82,6 +139,7 @@ afterAll(async () => {
   await rm(projectCwd, { recursive: true, force: true });
   await rm(await dataDirPromise, { recursive: true, force: true });
   delete process.env["CONDENSE_DATA_HOME"];
+  delete process.env["CONDENSE_LEGACY_STORE"];
   delete process.env["CLAUDE_CODE_SESSION_ID"];
   delete process.env["CLAUDE_PROJECT_DIR"];
 });
@@ -89,32 +147,92 @@ afterAll(async () => {
 describe("v0.3 SDK workflow", () => {
   test("preserves opaque entries and inactive branches while carrying searchable lineage", async () => {
     process.env["CONDENSE_DATA_HOME"] = await dataDirPromise;
+    const legacyDir = join(await dataDirPromise, "legacy");
+    process.env["CONDENSE_LEGACY_STORE"] = legacyDir;
     await mkdir(projectDir, { recursive: true });
     await mkdir(projectCwd, { recursive: true });
+    await mkdir(legacyDir, { recursive: true });
+    const legacyV1Session = "00000000-0000-0000-0000-aaaaaa111111";
+    const legacyV1Id = "aaaaaa111111:omitted-001";
+    await Bun.write(
+      join(legacyDir, `${legacyV1Session}.json`),
+      JSON.stringify({
+        version: 1,
+        nextId: 2,
+        entries: { [legacyV1Id]: { content: "generation-one-v1-keyword" } },
+      }),
+    );
+    const legacyV2Session = "00000000-0000-0000-0000-bbbbbb222222";
+    const legacyV2Cache = createEmptyCache();
+    const legacyV2Id = allocateOmission(legacyV2Cache, legacyV2Session, "generation-one-v2-keyword");
+    await saveOmissionCache(legacyV2Session, legacyV2Cache);
     const sourceId = randomUUID();
     createdSessions.add(sourceId);
     const sourcePath = join(projectDir, `${sourceId}.jsonl`);
     const firstUser = messageRow(sourceId, "user", null, "synthetic first prompt");
-    const firstUse = messageRow(sourceId, "assistant", firstUser["uuid"] as string, [{ type: "tool_use", id: "toolu_generation1", name: "Bash", input: { command: "emit generation-one-keyword" } }]);
-    const firstResult = messageRow(sourceId, "user", firstUse["uuid"] as string, [{ type: "tool_result", tool_use_id: "toolu_generation1", content: `generation-one-keyword\n${"a".repeat(1300)}` }]);
-    const signed = messageRow(sourceId, "assistant", firstResult["uuid"] as string, [{ type: "thinking", thinking: "synthetic reasoning", signature: "synthetic-signed-thinking" }, { type: "text", text: "synthetic durable prose" }]);
-    const inactive = messageRow(sourceId, "assistant", signed["uuid"] as string, [{ type: "text", text: `INACTIVE-${"z".repeat(12000)}` }]);
+    const firstUse = messageRow(sourceId, "assistant", firstUser["uuid"] as string, [
+      { type: "tool_use", id: "toolu_generation1", name: "Bash", input: { command: "emit generation-one-keyword" } },
+      { type: "tool_use", id: "toolu_legacy_v1", name: "Bash", input: { command: "legacy v1" } },
+      { type: "tool_use", id: "toolu_legacy_v2", name: "Bash", input: { command: "legacy v2" } },
+    ]);
+    const firstResult = messageRow(sourceId, "user", firstUse["uuid"] as string, [
+      { type: "tool_result", tool_use_id: "toolu_generation1", content: `generation-one-keyword\n${"a".repeat(1300)}` },
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_legacy_v1",
+        content: `[condense: output omitted (25ch) — retrieve: ${legacyV1Id}]`,
+      },
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_legacy_v2",
+        content: `[condense: output omitted (25ch) — retrieve: ${legacyV2Id}]`,
+      },
+    ]);
+    const signed = messageRow(sourceId, "assistant", firstResult["uuid"] as string, [
+      { type: "thinking", thinking: "synthetic reasoning", signature: "synthetic-signed-thinking" },
+      { type: "text", text: "synthetic durable prose" },
+    ]);
+    const inactive = messageRow(sourceId, "assistant", signed["uuid"] as string, [
+      { type: "text", text: `INACTIVE-${"z".repeat(12000)}` },
+    ]);
     const recentUser = messageRow(sourceId, "user", signed["uuid"] as string, "synthetic recent prompt");
-    const recentAssistant = messageRow(sourceId, "assistant", recentUser["uuid"] as string, [{ type: "text", text: "synthetic recent answer" }]);
-    const opaque = { type: "content-replacement", sessionId: sourceId, replacements: [{ sentinel: "preserved" }], uuid: randomUUID(), timestamp: timestamp() };
+    const recentAssistant = messageRow(sourceId, "assistant", recentUser["uuid"] as string, [
+      { type: "text", text: "synthetic recent answer" },
+    ]);
+    const opaque = {
+      type: "content-replacement",
+      sessionId: sourceId,
+      replacements: [{ sentinel: "preserved" }],
+      uuid: randomUUID(),
+      timestamp: timestamp(),
+    };
     const relocated = { type: "relocated", sessionId: sourceId, relocatedCwd: projectCwd };
-    await writeRows(sourcePath, [firstUser, firstUse, firstResult, signed, inactive, recentUser, recentAssistant, ...operationRows(sourceId, recentAssistant["uuid"] as string), opaque, relocated]);
+    await writeRows(sourcePath, [
+      firstUser,
+      firstUse,
+      firstResult,
+      signed,
+      inactive,
+      recentUser,
+      recentAssistant,
+      ...operationRows(sourceId, recentAssistant["uuid"] as string),
+      opaque,
+      relocated,
+    ]);
 
     const first = await analyzePrepareBuild(sourcePath);
     const firstRaw = await rawRows(first.transcriptPath);
-    expect(firstRaw.some((row) => row["type"] === "content-replacement" && JSON.stringify(row).includes("preserved"))).toBe(true);
+    expect(
+      firstRaw.some((row) => row["type"] === "content-replacement" && JSON.stringify(row).includes("preserved")),
+    ).toBe(true);
     expect(firstRaw.some((row) => row["type"] === "relocated")).toBe(true);
     expect(JSON.stringify(firstRaw)).toContain("INACTIVE-");
     const firstRows = await readTranscriptRows(first.transcriptPath);
     expect(JSON.stringify(firstRows)).toContain("synthetic-signed-thinking");
     expect(JSON.stringify(firstRows)).toContain("synthetic durable prose");
     expect(firstRows.at(-1)?.["condenseMarker"]).toBe(true);
-    for (const row of firstRows) if (row.parentUuid) expect(firstRows.some((candidate) => candidate.uuid === row.parentUuid)).toBe(true);
+    for (const row of firstRows)
+      if (row.parentUuid) expect(firstRows.some((candidate) => candidate.uuid === row.parentUuid)).toBe(true);
 
     await appendGeneration(first.transcriptPath, "generation-two-keyword");
     const second = await analyzePrepareBuild(first.transcriptPath);
@@ -122,8 +240,14 @@ describe("v0.3 SDK workflow", () => {
     const third = await analyzePrepareBuild(second.transcriptPath);
     expect(third.generation).toBe(3);
     const manifest = await loadManifest(third.sessionId);
-    expect(manifest?.contentIds.length).toBeGreaterThanOrEqual(3);
-    for (const keyword of ["generation-one-keyword", "generation-two-keyword", "generation-three-keyword"]) {
+    expect(manifest?.contentIds.length).toBeGreaterThanOrEqual(5);
+    for (const keyword of [
+      "generation-one-keyword",
+      "generation-one-v1-keyword",
+      "generation-one-v2-keyword",
+      "generation-two-keyword",
+      "generation-three-keyword",
+    ]) {
       const found = await searchOmittedContent({ query: keyword, config: DEFAULT_CONFIG, sessionId: third.sessionId });
       expect(found.matches.length).toBeGreaterThan(0);
     }
@@ -131,6 +255,8 @@ describe("v0.3 SDK workflow", () => {
     expect(raw.some((entry) => entry["type"] === "custom-title" && entry["condenseGeneration"] === 3)).toBe(true);
     expect(raw.some((entry) => entry["type"] === "agent-name")).toBe(true);
     expect(raw.filter((entry) => entry["condenseMarker"] === true)).toHaveLength(1);
-    expect(raw.every((entry) => !isRecord(entry["message"]) || !JSON.stringify(entry["message"]).includes("approxTokens"))).toBe(true);
+    expect(
+      raw.every((entry) => !isRecord(entry["message"]) || !JSON.stringify(entry["message"]).includes("approxTokens")),
+    ).toBe(true);
   }, 120000);
 });

@@ -1,6 +1,6 @@
 {
   "name": "condense",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Recoverable, model-ranked context condensation for Claude Code, derived in part from claude-magic-compact.",
   "author": {
     "name": "Aryan Shrivastava"

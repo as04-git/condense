@@ -54,7 +54,9 @@ function stringify(content: unknown): string {
   if (typeof content === "string") return content;
   if (content === undefined || content === null) return "";
   if (Array.isArray(content)) {
-    return content.map((block) => isRecord(block) && typeof block["text"] === "string" ? block["text"] : stringify(block)).join("\n");
+    return content
+      .map((block) => (isRecord(block) && typeof block["text"] === "string" ? block["text"] : stringify(block)))
+      .join("\n");
   }
   return JSON.stringify(content);
 }
@@ -100,34 +102,42 @@ function newerTargets(ops: Op[]): Map<string, Op> {
 }
 
 function isAgentResult(toolName: string, text: string): boolean {
-  return /^\s*<task-notification\b/.test(text)
-    || (["Agent", "Task", "TaskOutput"].includes(toolName) && /<(?:summary|result)>/.test(text));
+  return (
+    /^\s*<task-notification\b/.test(text) ||
+    (["Agent", "Task", "TaskOutput"].includes(toolName) && /<(?:summary|result)>/.test(text))
+  );
 }
 
 function outputDescription(name: string, text: string, input: JsonRecord | undefined, agent: boolean): string {
   if (agent) return `agent-result omitted${firstLine(text, 70) ? `: ${firstLine(text, 70)}` : ""}`;
   const path = input?.["file_path"] ?? input?.["notebook_path"];
-  if (typeof path === "string" && ["Read", "Edit", "Write", "NotebookEdit"].includes(name)) return `${name} output omitted (${path})`;
-  if (name === "Bash" && typeof input?.["command"] === "string") return `Bash output omitted (${firstLine(input["command"], 60)})`;
+  if (typeof path === "string" && ["Read", "Edit", "Write", "NotebookEdit"].includes(name))
+    return `${name} output omitted (${path})`;
+  if (name === "Bash" && typeof input?.["command"] === "string")
+    return `Bash output omitted (${firstLine(input["command"], 60)})`;
   return `${name} output omitted`;
 }
 
 function failureEvidence(text: string): string[] {
-  return text.split("\n")
+  return text
+    .split("\n")
     .filter((line) => /\b(error|failed|failure|exception|fatal|panic)\b/i.test(line))
     .slice(-3)
     .map((line) => firstLine(line, 180));
 }
 
 function candidateEvidence(text: string, failures: string[], limit: number): string {
-  const evidence = failures.length ? failures.join(" | ") : `${flat(text, Math.floor(limit / 2))} ⟂ ${flat(text.slice(-limit), Math.floor(limit / 2))}`;
+  const evidence = failures.length
+    ? failures.join(" | ")
+    : `${flat(text, Math.floor(limit / 2))} ⟂ ${flat(text.slice(-limit), Math.floor(limit / 2))}`;
   return flat(evidence, limit);
 }
 
 function labelFor(name: string, input: JsonRecord | undefined, suffix: string): string {
   const path = input?.["file_path"] ?? input?.["notebook_path"];
   if (typeof path === "string") return `${suffix} ${name} ${path}`;
-  if (name === "Bash" && typeof input?.["command"] === "string") return `${suffix} Bash ${firstLine(input["command"], 80)}`;
+  if (name === "Bash" && typeof input?.["command"] === "string")
+    return `${suffix} Bash ${firstLine(input["command"], 80)}`;
   return `${suffix} ${name}`;
 }
 
@@ -143,7 +153,17 @@ function defaultKeep(mode: CondenseConfig["policies"][PolicyClass]): boolean {
   return mode === "keep-all" || mode === "drop-ranked";
 }
 
-function priorityFor(action: "keep" | "drop" | "none", options: { errored?: boolean; agent?: boolean; reconstructible?: boolean; superseded?: boolean; latestEligible?: boolean; thinking?: boolean }): number {
+function priorityFor(
+  action: "keep" | "drop" | "none",
+  options: {
+    errored?: boolean;
+    agent?: boolean;
+    reconstructible?: boolean;
+    superseded?: boolean;
+    latestEligible?: boolean;
+    thinking?: boolean;
+  },
+): number {
   if (action === "keep") {
     if (options.errored || options.agent || (!options.reconstructible && options.latestEligible)) return 0;
     if (!options.reconstructible) return 1;
@@ -162,9 +182,16 @@ export function runAnalyze(
   rows: TranscriptRow[],
   configOrKeepTurns: CondenseConfig | number = DEFAULT_CONFIG,
 ): AnalyzeInternal {
-  const config = typeof configOrKeepTurns === "number"
-    ? { ...DEFAULT_CONFIG, keepTurns: configOrKeepTurns, policies: { ...DEFAULT_CONFIG.policies }, analysis: { ...DEFAULT_CONFIG.analysis }, retrieval: { ...DEFAULT_CONFIG.retrieval } }
-    : configOrKeepTurns;
+  const config =
+    typeof configOrKeepTurns === "number"
+      ? {
+          ...DEFAULT_CONFIG,
+          keepTurns: configOrKeepTurns,
+          policies: { ...DEFAULT_CONFIG.policies },
+          analysis: { ...DEFAULT_CONFIG.analysis },
+          retrieval: { ...DEFAULT_CONFIG.retrieval },
+        }
+      : configOrKeepTurns;
   const turns = buildAssistantTurns(rows);
   const count = turns.length;
   const toolNames = new Map<string, string>();
@@ -201,7 +228,26 @@ export function runAnalyze(
             const action = actionForMode(config.policies.thinking);
             const size = JSON.stringify(block).length;
             const ref = `t:${row.uuid}#${blockIndex}`;
-            thinking.push({ ref, class: "thinking", action, defaultKeep: defaultKeep(config.policies.thinking), turn: turnIndex, size, netChars: size, kind: "thinking", label: `thinking block ${blockIndex + 1}`, notice: "", signals: "unrecoverable", evidence: "prompt-anchored reasoning", deepEvidence: "Thinking content is intentionally not echoed; use the turn prompt and current-session memory.", age, uuid: row.uuid, blockIndex, priority: priorityFor(action, { thinking: true }) });
+            thinking.push({
+              ref,
+              class: "thinking",
+              action,
+              defaultKeep: defaultKeep(config.policies.thinking),
+              turn: turnIndex,
+              size,
+              netChars: size,
+              kind: "thinking",
+              label: `thinking block ${blockIndex + 1}`,
+              notice: "",
+              signals: "unrecoverable",
+              evidence: "prompt-anchored reasoning",
+              deepEvidence:
+                "Thinking content is intentionally not echoed; use the turn prompt and current-session memory.",
+              age,
+              uuid: row.uuid,
+              blockIndex,
+              priority: priorityFor(action, { thinking: true }),
+            });
           } else if (block["type"] === "tool_use" && rankable(turnIndex, count, config.keepTurns)) {
             const size = bigInputSize(block);
             if (!size || typeof block["id"] !== "string") return;
@@ -214,14 +260,42 @@ export function runAnalyze(
             const ref = `i:${block["id"]}`;
             const netChars = blockDelta(block, clone);
             if (netChars <= 0) return;
-            attachments.push({ ref, class: "tools", action, defaultKeep: defaultKeep(config.policies.tools), turn: turnIndex, size, netChars, kind: "tool-input", label: labelFor(name, input, "input"), notice: "", signals: name === "Bash" ? "partially-retained" : "recoverable", evidence: candidateEvidence(raw, [], INITIAL_EVIDENCE_CHARS), deepEvidence: candidateEvidence(raw, [], DEEP_EVIDENCE_CHARS), age, priority: priorityFor(action, { reconstructible: ["Write", "Edit", "NotebookEdit"].includes(name), latestEligible: age === config.keepTurns }), newerOnSameTarget: false, newerOnSameTargetBy: null });
+            attachments.push({
+              ref,
+              class: "tools",
+              action,
+              defaultKeep: defaultKeep(config.policies.tools),
+              turn: turnIndex,
+              size,
+              netChars,
+              kind: "tool-input",
+              label: labelFor(name, input, "input"),
+              notice: "",
+              signals: name === "Bash" ? "partially-retained" : "recoverable",
+              evidence: candidateEvidence(raw, [], INITIAL_EVIDENCE_CHARS),
+              deepEvidence: candidateEvidence(raw, [], DEEP_EVIDENCE_CHARS),
+              age,
+              priority: priorityFor(action, {
+                reconstructible: ["Write", "Edit", "NotebookEdit"].includes(name),
+                latestEligible: age === config.keepTurns,
+              }),
+              newerOnSameTarget: false,
+              newerOnSameTargetBy: null,
+            });
           }
         });
       } else if (isToolResultRow(row)) {
         for (const block of content) {
-          if (!isRecord(block) || block["type"] !== "tool_result" || !rankable(turnIndex, count, config.keepTurns)) continue;
+          if (!isRecord(block) || block["type"] !== "tool_result" || !rankable(turnIndex, count, config.keepTurns))
+            continue;
           const raw = stringify(block["content"]);
-          if (!raw || raw.length < OUTPUT_FLOOR_CHARS || isCondenseNotice(raw) || typeof block["tool_use_id"] !== "string") continue;
+          if (
+            !raw ||
+            raw.length < OUTPUT_FLOOR_CHARS ||
+            isCondenseNotice(raw) ||
+            typeof block["tool_use_id"] !== "string"
+          )
+            continue;
           const id = block["tool_use_id"];
           const name = toolNames.get(id) ?? "?";
           const input = toolInputs.get(id);
@@ -235,8 +309,39 @@ export function runAnalyze(
           const later = newer.get(id);
           const reconstructible = ["Read", "Edit", "Write", "NotebookEdit"].includes(name);
           const failures = failureEvidence(raw);
-          const signals = [block["is_error"] === true ? "error" : "", agent ? "agent-result" : "", later ? `superseded:${later.name}@t${later.turn}` : "", reconstructible ? "reconstructible" : "recoverable"].filter(Boolean).join("|");
-          attachments.push({ ref: `o:${id}`, class: candidateClass, action, defaultKeep: defaultKeep(config.policies[candidateClass]), turn: turnIndex, size: raw.length, netChars, kind: agent ? "agent-result" : "tool-output", label: labelFor(name, input, "output"), notice: description, signals, evidence: candidateEvidence(raw, failures, INITIAL_EVIDENCE_CHARS), deepEvidence: candidateEvidence(raw, failures, DEEP_EVIDENCE_CHARS), age, priority: priorityFor(action, { errored: block["is_error"] === true, agent, reconstructible, superseded: Boolean(later), latestEligible: age === config.keepTurns }), newerOnSameTarget: Boolean(later), newerOnSameTargetBy: later ? `${later.name}@t${later.turn}` : null });
+          const signals = [
+            block["is_error"] === true ? "error" : "",
+            agent ? "agent-result" : "",
+            later ? `superseded:${later.name}@t${later.turn}` : "",
+            reconstructible ? "reconstructible" : "recoverable",
+          ]
+            .filter(Boolean)
+            .join("|");
+          attachments.push({
+            ref: `o:${id}`,
+            class: candidateClass,
+            action,
+            defaultKeep: defaultKeep(config.policies[candidateClass]),
+            turn: turnIndex,
+            size: raw.length,
+            netChars,
+            kind: agent ? "agent-result" : "tool-output",
+            label: labelFor(name, input, "output"),
+            notice: description,
+            signals,
+            evidence: candidateEvidence(raw, failures, INITIAL_EVIDENCE_CHARS),
+            deepEvidence: candidateEvidence(raw, failures, DEEP_EVIDENCE_CHARS),
+            age,
+            priority: priorityFor(action, {
+              errored: block["is_error"] === true,
+              agent,
+              reconstructible,
+              superseded: Boolean(later),
+              latestEligible: age === config.keepTurns,
+            }),
+            newerOnSameTarget: Boolean(later),
+            newerOnSameTargetBy: later ? `${later.name}@t${later.turn}` : null,
+          });
         }
       } else if (row.type === "user" && rankable(turnIndex, count, config.keepTurns)) {
         const injection = injectedInfo(row);
@@ -244,19 +349,56 @@ export function runAnalyze(
         const candidateClass: AttachmentClass = injection.skill ? "skills" : "injections";
         const action = actionForMode(config.policies[candidateClass]);
         const raw = stringify(content);
-        const description = injection.skill ? `skill ${injection.skill} omitted; re-invoke /${injection.skill}` : "injected content omitted";
+        const description = injection.skill
+          ? `skill ${injection.skill} omitted; re-invoke /${injection.skill}`
+          : "injected content omitted";
         const replacement = [{ type: "text", text: omissionNotice(description, injection.size, PLACEHOLDER_ID) }];
         const netChars = Math.max(0, JSON.stringify(content).length - JSON.stringify(replacement).length);
         if (netChars <= 0) continue;
-        attachments.push({ ref: `s:${row.uuid}`, class: candidateClass, action, defaultKeep: defaultKeep(config.policies[candidateClass]), turn: turnIndex, size: injection.size, netChars, kind: injection.skill ? "skill" : "injected", label: injection.skill ? `skill /${injection.skill}` : "injected content", notice: description, signals: injection.skill ? "re-invokable|recoverable" : "recoverable", evidence: candidateEvidence(raw, [], INITIAL_EVIDENCE_CHARS), deepEvidence: candidateEvidence(raw, [], DEEP_EVIDENCE_CHARS), age, priority: priorityFor(action, { reconstructible: Boolean(injection.skill) }), newerOnSameTarget: false, newerOnSameTargetBy: null });
+        attachments.push({
+          ref: `s:${row.uuid}`,
+          class: candidateClass,
+          action,
+          defaultKeep: defaultKeep(config.policies[candidateClass]),
+          turn: turnIndex,
+          size: injection.size,
+          netChars,
+          kind: injection.skill ? "skill" : "injected",
+          label: injection.skill ? `skill /${injection.skill}` : "injected content",
+          notice: description,
+          signals: injection.skill ? "re-invokable|recoverable" : "recoverable",
+          evidence: candidateEvidence(raw, [], INITIAL_EVIDENCE_CHARS),
+          deepEvidence: candidateEvidence(raw, [], DEEP_EVIDENCE_CHARS),
+          age,
+          priority: priorityFor(action, { reconstructible: Boolean(injection.skill) }),
+          newerOnSameTarget: false,
+          newerOnSameTargetBy: null,
+        });
       }
     }
   });
 
-  attachments.sort((a, b) => a.action.localeCompare(b.action) || a.priority - b.priority || b.netChars - a.netChars || a.ref.localeCompare(b.ref));
-  thinking.sort((a, b) => a.action.localeCompare(b.action) || a.priority - b.priority || b.netChars - a.netChars || a.ref.localeCompare(b.ref));
-  const attachmentManifest: CandidateManifestItem[] = attachments.map(({ age: _age, priority: _priority, newerOnSameTarget: _newer, newerOnSameTargetBy: _newerBy, ...candidate }) => candidate);
-  const thinkingManifest: CandidateManifestItem[] = thinking.map(({ age: _age, priority: _priority, uuid: _uuid, blockIndex: _blockIndex, ...candidate }) => candidate);
+  attachments.sort(
+    (a, b) =>
+      a.action.localeCompare(b.action) ||
+      a.priority - b.priority ||
+      b.netChars - a.netChars ||
+      a.ref.localeCompare(b.ref),
+  );
+  thinking.sort(
+    (a, b) =>
+      a.action.localeCompare(b.action) ||
+      a.priority - b.priority ||
+      b.netChars - a.netChars ||
+      a.ref.localeCompare(b.ref),
+  );
+  const attachmentManifest: CandidateManifestItem[] = attachments.map(
+    ({ age: _age, priority: _priority, newerOnSameTarget: _newer, newerOnSameTargetBy: _newerBy, ...candidate }) =>
+      candidate,
+  );
+  const thinkingManifest: CandidateManifestItem[] = thinking.map(
+    ({ age: _age, priority: _priority, uuid: _uuid, blockIndex: _blockIndex, ...candidate }) => candidate,
+  );
   const candidateManifest = [...attachmentManifest, ...thinkingManifest];
   return {
     scope: `${count} turns; last ${config.keepTurns} untouched`,
@@ -270,14 +412,27 @@ export function runAnalyze(
 const COLUMNS = ["ref", "turn", "kind", "netChars", "label", "signals", "evidence"] as const;
 
 function candidateRow(candidate: CandidateManifestItem, deep = false): unknown[] {
-  return [candidate.ref, candidate.turn, candidate.kind, candidate.netChars, candidate.label, candidate.signals, deep ? candidate.deepEvidence : candidate.evidence];
+  return [
+    candidate.ref,
+    candidate.turn,
+    candidate.kind,
+    candidate.netChars,
+    candidate.label,
+    candidate.signals,
+    deep ? candidate.deepEvidence : candidate.evidence,
+  ];
 }
 
 function automaticRows(record: AnalysisRecord): Array<["inline" | "omit", string, number]> {
   return record.automatic;
 }
 
-function pageObject(record: AnalysisRecord, selected: CandidateManifestItem[], nextOffset: number | null, deep = false) {
+function pageObject(
+  record: AnalysisRecord,
+  selected: CandidateManifestItem[],
+  nextOffset: number | null,
+  deep = false,
+) {
   const turnIds = new Set(selected.map((candidate) => candidate.turn));
   const rankable = record.candidates.filter((candidate) => candidate.action !== "none");
   const remaining = nextOffset === null ? [] : rankable.slice(nextOffset);
@@ -286,23 +441,42 @@ function pageObject(record: AnalysisRecord, selected: CandidateManifestItem[], n
     scope: `${record.turns.length} turns; last ${record.config.keepTurns} untouched`,
     columns: COLUMNS,
     turns: record.turns.filter((turn) => turnIds.has(turn.turn)).map((turn) => [turn.turn, turn.prompt]),
-    reviewToKeep: selected.filter((candidate) => candidate.action === "keep").map((candidate) => candidateRow(candidate, deep)),
-    reviewToDrop: selected.filter((candidate) => candidate.action === "drop").map((candidate) => candidateRow(candidate, deep)),
+    reviewToKeep: selected
+      .filter((candidate) => candidate.action === "keep")
+      .map((candidate) => candidateRow(candidate, deep)),
+    reviewToDrop: selected
+      .filter((candidate) => candidate.action === "drop")
+      .map((candidate) => candidateRow(candidate, deep)),
     automatic: automaticRows(record),
-    ...(nextOffset === null ? {} : { more: { cursor: `p_${nextOffset}`, reviewToKeep: remaining.filter((candidate) => candidate.action === "keep").length, reviewToDrop: remaining.filter((candidate) => candidate.action === "drop").length } }),
+    ...(nextOffset === null
+      ? {}
+      : {
+          more: {
+            cursor: `p_${nextOffset}`,
+            reviewToKeep: remaining.filter((candidate) => candidate.action === "keep").length,
+            reviewToDrop: remaining.filter((candidate) => candidate.action === "drop").length,
+          },
+        }),
   };
 }
 
 export function renderAnalysisPage(record: AnalysisRecord, offset = 0): ReturnType<typeof pageObject> {
   const rankable = record.candidates.filter((candidate) => candidate.action !== "none");
-  if (!Number.isInteger(offset) || offset < 0 || offset >= Math.max(1, rankable.length)) throw new Error("Invalid inspect cursor");
+  if (!Number.isInteger(offset) || offset < 0 || offset >= Math.max(1, rankable.length))
+    throw new Error("Invalid inspect cursor");
   const selected: CandidateManifestItem[] = [];
   let next: number | null = null;
   for (let index = offset; index < rankable.length; index++) {
     const candidate = rankable[index]!;
     const trial = [...selected, candidate];
     const trialNext = index + 1 < rankable.length ? index + 1 : null;
-    if (JSON.stringify(pageObject(record, trial, trialNext)).length > record.config.analysis.maxPageChars && selected.length > 0) { next = index; break; }
+    if (
+      JSON.stringify(pageObject(record, trial, trialNext)).length > record.config.analysis.maxPageChars &&
+      selected.length > 0
+    ) {
+      next = index;
+      break;
+    }
     selected.push(candidate);
     next = trialNext;
   }
@@ -318,7 +492,13 @@ export function renderRefInspection(record: AnalysisRecord, refs: string[]): Ret
   });
   let output = pageObject(record, selected, null, true);
   if (JSON.stringify(output).length > record.config.analysis.maxPageChars) {
-    const bounded = selected.map((candidate) => ({ ...candidate, deepEvidence: flat(candidate.deepEvidence, Math.max(120, Math.floor((record.config.analysis.maxPageChars - 1000) / selected.length))) }));
+    const bounded = selected.map((candidate) => ({
+      ...candidate,
+      deepEvidence: flat(
+        candidate.deepEvidence,
+        Math.max(120, Math.floor((record.config.analysis.maxPageChars - 1000) / selected.length)),
+      ),
+    }));
     output = pageObject(record, bounded, null, true);
   }
   return output;

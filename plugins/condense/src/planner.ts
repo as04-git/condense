@@ -1,6 +1,6 @@
 import { collectReferencedContentIds, makeV3Object, omissionNotice, type V3OmissionObject } from "./omission";
 import { pruneToolInputWithId } from "./prune";
-import type { CandidateManifestItem, PrepareDecision } from "./protocol";
+import { sha256, type CandidateManifestItem, type PrepareDecision } from "./protocol";
 import { isRecord, isToolResultRow, type JsonRecord, type TranscriptRow } from "./transcript";
 
 export type RetentionCounts = {
@@ -35,7 +35,10 @@ function emptyCounts(): RetentionCounts {
   };
 }
 
-export function validateDecision(decision: Pick<PrepareDecision, "keep" | "drop">, candidates: CandidateManifestItem[]): void {
+export function validateDecision(
+  decision: Pick<PrepareDecision, "keep" | "drop">,
+  candidates: CandidateManifestItem[],
+): void {
   const byRef = new Map(candidates.map((candidate) => [candidate.ref, candidate]));
   const keepSet = new Set(decision.keep);
   const dropSet = new Set(decision.drop);
@@ -52,7 +55,10 @@ export function validateDecision(decision: Pick<PrepareDecision, "keep" | "drop"
   }
 }
 
-export function shouldKeepCandidate(candidate: CandidateManifestItem, decision: Pick<PrepareDecision, "keep" | "drop">): boolean {
+export function shouldKeepCandidate(
+  candidate: CandidateManifestItem,
+  decision: Pick<PrepareDecision, "keep" | "drop">,
+): boolean {
   if (candidate.action === "keep") return decision.keep.includes(candidate.ref);
   if (candidate.action === "drop") return !decision.drop.includes(candidate.ref);
   return candidate.defaultKeep;
@@ -89,7 +95,18 @@ function toolMaps(rows: TranscriptRow[]): { names: Map<string, string>; inputs: 
 }
 
 export function contextChars(rows: Array<JsonRecord | TranscriptRow>): number {
-  return rows.reduce((sum, row) => sum + (isRecord(row["message"]) ? JSON.stringify(row["message"]["content"] ?? "").length : 0), 0);
+  return rows.reduce(
+    (sum, row) => sum + (isRecord(row["message"]) ? JSON.stringify(row["message"]["content"] ?? "").length : 0),
+    0,
+  );
+}
+
+export function contextContentDigest(rows: Array<JsonRecord | TranscriptRow>, appendedMarker?: string): string {
+  const content = rows.flatMap((row) =>
+    isRecord(row["message"]) ? [{ type: row["type"], content: (row["message"] as JsonRecord)["content"] }] : [],
+  );
+  if (appendedMarker !== undefined) content.push({ type: "user", content: appendedMarker });
+  return sha256(content);
 }
 
 export function applyRetention(args: {
@@ -113,7 +130,10 @@ export function applyRetention(args: {
   for (const row of rows) {
     const originalUuid = args.originalUuid(row);
     if (!args.activeOriginalUuids.has(originalUuid)) continue;
-    if (row["condenseMarker"] === true) { droppedRows.add(row.uuid); continue; }
+    if (row["condenseMarker"] === true) {
+      droppedRows.add(row.uuid);
+      continue;
+    }
     if (!isRecord(row.message) || !Array.isArray(row.message["content"])) continue;
     const content = row.message["content"];
     if (row.type === "assistant") {
@@ -122,8 +142,13 @@ export function applyRetention(args: {
         const candidate = candidates.get(`t:${originalUuid}#${blockIndex}`);
         if (!candidate) return true;
         const keep = shouldKeepCandidate(candidate, args.decision);
-        if (keep) { counts.thinkingKept++; keptThinkingTurns.add(candidate.turn); }
-        else { counts.thinkingDropped++; droppedThinkingTurns.add(candidate.turn); }
+        if (keep) {
+          counts.thinkingKept++;
+          keptThinkingTurns.add(candidate.turn);
+        } else {
+          counts.thinkingDropped++;
+          droppedThinkingTurns.add(candidate.turn);
+        }
         return keep;
       });
       row.message["content"] = filtered;
@@ -153,7 +178,18 @@ export function applyRetention(args: {
         if (!contentId) throw new Error(`Prepared plan is missing an omission ID for ${candidate.ref}`);
         const value = block["content"];
         const input = maps.inputs.get(block["tool_use_id"]);
-        objects.push(makeV3Object(contentId, value, { kind: candidate.kind === "agent-result" ? "agent-result" : "tool-output", metadata: { toolName: maps.names.get(block["tool_use_id"]) ?? "?", toolUseId: block["tool_use_id"], path: input?.["file_path"] ?? input?.["notebook_path"], command: typeof input?.["command"] === "string" ? input["command"].slice(0, 200) : undefined, isError: block["is_error"] === true } }));
+        objects.push(
+          makeV3Object(contentId, value, {
+            kind: candidate.kind === "agent-result" ? "agent-result" : "tool-output",
+            metadata: {
+              toolName: maps.names.get(block["tool_use_id"]) ?? "?",
+              toolUseId: block["tool_use_id"],
+              path: input?.["file_path"] ?? input?.["notebook_path"],
+              command: typeof input?.["command"] === "string" ? input["command"].slice(0, 200) : undefined,
+              isError: block["is_error"] === true,
+            },
+          }),
+        );
         block["content"] = omissionNotice(candidate.notice, stringifyContent(value).length, contentId);
       }
     } else if (row.type === "user") {
@@ -165,7 +201,12 @@ export function applyRetention(args: {
       const contentId = args.omissionIds[candidate.ref];
       if (!contentId) throw new Error(`Prepared plan is missing an omission ID for ${candidate.ref}`);
       const value = row.message["content"];
-      objects.push(makeV3Object(contentId, value, { kind: candidate.kind === "skill" ? "skill" : "injected", metadata: { rowUuid: originalUuid, label: candidate.label } }));
+      objects.push(
+        makeV3Object(contentId, value, {
+          kind: candidate.kind === "skill" ? "skill" : "injected",
+          metadata: { rowUuid: originalUuid, label: candidate.label },
+        }),
+      );
       row.message["content"] = [{ type: "text", text: omissionNotice(candidate.notice, candidate.size, contentId) }];
     }
   }
@@ -200,7 +241,9 @@ export function markerContents(args: {
   ].join("\n");
 }
 
-export function convergeMarker(args: Omit<Parameters<typeof markerContents>[0], "finalChars"> & { beforeMarkerChars: number }): { text: string; finalChars: number } {
+export function convergeMarker(
+  args: Omit<Parameters<typeof markerContents>[0], "finalChars"> & { beforeMarkerChars: number },
+): { text: string; finalChars: number } {
   for (let guess = args.beforeMarkerChars; guess < args.beforeMarkerChars + 10000; guess++) {
     const base = markerContents({ ...args, finalChars: guess });
     const baseTotal = args.beforeMarkerChars + JSON.stringify(base).length;
@@ -224,10 +267,27 @@ export function projectRetention(args: {
 }): Projection {
   const sourceChars = contextChars(args.rows);
   const activeOriginalUuids = new Set(args.rows.map((row) => row.uuid));
-  const applied = applyRetention({ rows: args.rows, candidates: args.candidates, decision: args.decision, omissionIds: args.omissionIds, activeOriginalUuids, originalUuid: (row) => row.uuid });
+  const applied = applyRetention({
+    rows: args.rows,
+    candidates: args.candidates,
+    decision: args.decision,
+    omissionIds: args.omissionIds,
+    activeOriginalUuids,
+    originalUuid: (row) => row.uuid,
+  });
   const rows = applied.rows.filter((row) => !applied.droppedRows.has(row.uuid));
   const lineageIds = collectReferencedContentIds(rows);
   const beforeMarker = contextChars(rows);
-  const marker = convergeMarker({ sourceSessionId: args.sourceSessionId, generation: args.generation, keepTurns: args.keepTurns, sourceChars, beforeMarkerChars: beforeMarker, lineageCount: lineageIds.length, counts: applied.counts, droppedThinkingTurns: applied.droppedThinkingTurns, prompts: args.prompts });
+  const marker = convergeMarker({
+    sourceSessionId: args.sourceSessionId,
+    generation: args.generation,
+    keepTurns: args.keepTurns,
+    sourceChars,
+    beforeMarkerChars: beforeMarker,
+    lineageCount: lineageIds.length,
+    counts: applied.counts,
+    droppedThinkingTurns: applied.droppedThinkingTurns,
+    prompts: args.prompts,
+  });
   return { ...applied, rows, sourceChars, projectedChars: marker.finalChars, markerText: marker.text, lineageIds };
 }

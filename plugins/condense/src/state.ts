@@ -1,11 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Attachment, AnalyzeInternal } from "./analyze";
 import type { CondenseConfig } from "./config";
 import type { DecisionInput, SessionIdentity, TokenProjection } from "./host";
 import type { CandidateManifestItem } from "./protocol";
+import { durableRename } from "./durable";
 import { isRecord, type JsonRecord } from "./transcript";
 
 const RECORD_VERSION = 1;
@@ -25,6 +26,7 @@ export type AnalysisRecord = {
   handle: string;
   createdAt: string;
   producer: "condense@0.3.0";
+  selectionAlgorithm: "claude-active-context-v1";
   source: StoredSource;
   config: CondenseConfig;
   candidates: CandidateManifestItem[];
@@ -50,19 +52,24 @@ export type PreparedRecord = {
   analysisHandle: string;
   createdAt: string;
   producer: "condense@0.3.0";
+  selectionAlgorithm: "claude-active-context-v1";
   source: StoredSource;
   config: CondenseConfig;
   decision: DecisionInput;
   omissions: Record<string, string>;
   generation: number;
   title: string;
+  plannedContextDigest: string;
   stats: PreparedStats;
 };
 
 export type PendingRecord = AnalysisRecord | PreparedRecord;
 
 function dataRoot(): string {
-  return process.env["CONDENSE_DATA_HOME"] || join(process.env["XDG_DATA_HOME"] || join(homedir(), ".local", "share"), "condense");
+  return (
+    process.env["CONDENSE_DATA_HOME"] ||
+    join(process.env["XDG_DATA_HOME"] || join(homedir(), ".local", "share"), "condense")
+  );
 }
 
 function pendingDir(): string {
@@ -89,44 +96,62 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   } finally {
     await handle.close();
   }
-  await rename(temporary, path);
+  await durableRename(temporary, path);
   await chmod(path, 0o600);
 }
 
 function assertSource(value: unknown): asserts value is StoredSource {
-  if (!isRecord(value) || !isRecord(value["identity"])
-    || value["identity"]["host"] !== "claude-code"
-    || typeof value["identity"]["sessionId"] !== "string"
-    || typeof value["identity"]["transcriptPath"] !== "string"
-    || typeof value["identity"]["projectCwd"] !== "string"
-    || typeof value["cutoffUuid"] !== "string"
-    || typeof value["operationUserUuid"] !== "string"
-    || typeof value["storageDigest"] !== "string"
-    || typeof value["contextDigest"] !== "string") {
+  if (
+    !isRecord(value) ||
+    !isRecord(value["identity"]) ||
+    (value["identity"]["host"] !== "claude-code" && value["identity"]["host"] !== "codex") ||
+    typeof value["identity"]["sessionId"] !== "string" ||
+    typeof value["identity"]["transcriptPath"] !== "string" ||
+    typeof value["identity"]["projectCwd"] !== "string" ||
+    typeof value["cutoffUuid"] !== "string" ||
+    typeof value["operationUserUuid"] !== "string" ||
+    typeof value["storageDigest"] !== "string" ||
+    typeof value["contextDigest"] !== "string"
+  ) {
     throw new Error("Malformed condense pending-record source");
   }
 }
 
 function parseRecord(raw: unknown, expected: PendingRecord["type"]): PendingRecord {
-  if (!isRecord(raw) || raw["version"] !== RECORD_VERSION || raw["type"] !== expected
-    || typeof raw["handle"] !== "string" || typeof raw["createdAt"] !== "string") {
-    throw new Error(`Unsupported or malformed ${expected} record; rerun ${expected === "analysis" ? "analyze" : "prepare"}.`);
+  if (
+    !isRecord(raw) ||
+    raw["version"] !== RECORD_VERSION ||
+    raw["type"] !== expected ||
+    typeof raw["handle"] !== "string" ||
+    typeof raw["createdAt"] !== "string" ||
+    raw["producer"] !== "condense@0.3.0" ||
+    raw["selectionAlgorithm"] !== "claude-active-context-v1" ||
+    (expected === "prepared" && typeof raw["plannedContextDigest"] !== "string")
+  ) {
+    throw new Error(
+      `Unsupported or malformed ${expected} record; rerun ${expected === "analysis" ? "analyze" : "prepare"}.`,
+    );
   }
   assertSource(raw["source"]);
   const created = Date.parse(raw["createdAt"]);
   if (!Number.isFinite(created) || Date.now() - created > TTL_MS) {
-    throw new Error(`${expected === "analysis" ? "Analysis receipt" : "Prepared plan"} expired; rerun ${expected === "analysis" ? "analyze" : "prepare"}.`);
+    throw new Error(
+      `${expected === "analysis" ? "Analysis receipt" : "Prepared plan"} expired; rerun ${expected === "analysis" ? "analyze" : "prepare"}.`,
+    );
   }
   return raw as PendingRecord;
 }
 
-export async function saveAnalysisRecord(input: Omit<AnalysisRecord, "version" | "type" | "handle" | "createdAt" | "producer">): Promise<AnalysisRecord> {
+export async function saveAnalysisRecord(
+  input: Omit<AnalysisRecord, "version" | "type" | "handle" | "createdAt" | "producer" | "selectionAlgorithm">,
+): Promise<AnalysisRecord> {
   const record: AnalysisRecord = {
     version: 1,
     type: "analysis",
     handle: randomHandle("cr"),
     createdAt: new Date().toISOString(),
     producer: "condense@0.3.0",
+    selectionAlgorithm: "claude-active-context-v1",
     ...input,
   };
   await atomicJson(recordPath(record.handle), record);
@@ -134,13 +159,16 @@ export async function saveAnalysisRecord(input: Omit<AnalysisRecord, "version" |
   return record;
 }
 
-export async function savePreparedRecord(input: Omit<PreparedRecord, "version" | "type" | "handle" | "createdAt" | "producer">): Promise<PreparedRecord> {
+export async function savePreparedRecord(
+  input: Omit<PreparedRecord, "version" | "type" | "handle" | "createdAt" | "producer" | "selectionAlgorithm">,
+): Promise<PreparedRecord> {
   const record: PreparedRecord = {
     version: 1,
     type: "prepared",
     handle: randomHandle("bp"),
     createdAt: new Date().toISOString(),
     producer: "condense@0.3.0",
+    selectionAlgorithm: "claude-active-context-v1",
     ...input,
   };
   await atomicJson(recordPath(record.handle), record);
@@ -173,14 +201,14 @@ export async function removePending(handle: string): Promise<void> {
   await unlink(recordPath(handle)).catch(() => undefined);
 }
 
-export async function withPlanLock<T>(handle: string, action: () => Promise<T>): Promise<T> {
+async function withRecordLock<T>(handle: string, conflictMessage: string, action: () => Promise<T>): Promise<T> {
   const path = `${recordPath(handle)}.lock`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   let lock;
   try {
     lock = await open(path, "wx", 0o600);
   } catch {
-    throw new Error("This prepared plan is already being built.");
+    throw new Error(conflictMessage);
   }
   try {
     return await action();
@@ -190,6 +218,14 @@ export async function withPlanLock<T>(handle: string, action: () => Promise<T>):
   }
 }
 
+export async function withPlanLock<T>(handle: string, action: () => Promise<T>): Promise<T> {
+  return withRecordLock(handle, "This prepared plan is already being built.", action);
+}
+
+export async function withReceiptLock<T>(handle: string, action: () => Promise<T>): Promise<T> {
+  return withRecordLock(handle, "This analysis receipt is already being prepared or built.", action);
+}
+
 async function collectExpiredRecords(): Promise<void> {
   let names: string[];
   try {
@@ -197,14 +233,18 @@ async function collectExpiredRecords(): Promise<void> {
   } catch {
     return;
   }
-  await Promise.all(names.filter((name) => name.endsWith(".json")).map(async (name) => {
-    const path = join(pendingDir(), name);
-    try {
-      if (Date.now() - (await stat(path)).mtimeMs > TTL_MS) await rm(path, { force: true });
-    } catch {
-      // Opportunistic collection must never break the active workflow.
-    }
-  }));
+  await Promise.all(
+    names
+      .filter((name) => name.endsWith(".json"))
+      .map(async (name) => {
+        const path = join(pendingDir(), name);
+        try {
+          if (Date.now() - (await stat(path)).mtimeMs > TTL_MS) await rm(path, { force: true });
+        } catch {
+          // Opportunistic collection must never break the active workflow.
+        }
+      }),
+  );
 }
 
 export function sourceFromRecord(value: unknown): StoredSource {

@@ -1,4 +1,5 @@
-import { chmod, open, readFile, rename } from "node:fs/promises";
+import { chmod, open, readFile } from "node:fs/promises";
+import { durableRename } from "./durable";
 
 export type JsonRecord = Record<string, unknown>;
 export type RawTranscriptEntry = JsonRecord;
@@ -24,37 +25,30 @@ export type Turn = {
   rows: TranscriptRow[];
 };
 
-export async function readActiveTranscriptRows(
-  transcriptPath: string,
-): Promise<TranscriptRow[]> {
+export async function readActiveTranscriptRows(transcriptPath: string): Promise<TranscriptRow[]> {
   const rows = await readTranscriptRows(transcriptPath);
   return selectActiveTranscriptRows(rows);
 }
 
 export function selectActiveTranscriptRows(rows: TranscriptRow[]): TranscriptRow[] {
   const lastBoundaryIndex = rows.findLastIndex(isCompactBoundary);
-  return buildActiveChain(
-    lastBoundaryIndex === -1 ? rows : rows.slice(lastBoundaryIndex + 1),
-  );
+  return buildActiveChain(lastBoundaryIndex === -1 ? rows : rows.slice(lastBoundaryIndex + 1));
 }
 
-export async function writeTranscriptEntries(
-  transcriptPath: string,
-  entries: JsonRecord[],
-): Promise<void> {
+export async function writeTranscriptEntries(transcriptPath: string, entries: JsonRecord[]): Promise<void> {
   const temporary = `${transcriptPath}.condense-${process.pid}-${crypto.randomUUID()}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(`${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+    await handle.writeFile(`${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
     await handle.sync();
-  } finally { await handle.close(); }
+  } finally {
+    await handle.close();
+  }
   await chmod(temporary, 0o600);
-  await rename(temporary, transcriptPath);
+  await durableRename(temporary, transcriptPath);
 }
 
-export async function readTranscriptRows(
-  transcriptPath: string,
-): Promise<TranscriptRow[]> {
+export async function readTranscriptRows(transcriptPath: string): Promise<TranscriptRow[]> {
   const entries = await readTranscriptEntries(transcriptPath);
   return entries.filter(isTranscriptRow);
 }
@@ -91,25 +85,16 @@ export function buildAssistantTurns(rows: TranscriptRow[]): Turn[] {
     }
   }
 
-  return turns.filter(turn =>
-    turn.rows.some(row => row.type === "assistant" || isToolResultRow(row)),
-  );
+  return turns.filter((turn) => turn.rows.some((row) => row.type === "assistant" || isToolResultRow(row)));
 }
 
 function buildActiveChain(rows: TranscriptRow[]): TranscriptRow[] {
-  const rowsByUuid = new Map(rows.map(row => [row.uuid, row]));
-  const parentUuids = new Set(
-    rows
-      .map(row => row.parentUuid)
-      .filter((uuid): uuid is string => uuid !== null),
-  );
-  const terminalRows = rows.filter(row => !parentUuids.has(row.uuid));
+  const rowsByUuid = new Map(rows.map((row) => [row.uuid, row]));
+  const parentUuids = new Set(rows.map((row) => row.parentUuid).filter((uuid): uuid is string => uuid !== null));
+  const terminalRows = rows.filter((row) => !parentUuids.has(row.uuid));
   const hasUserAssistantChild = new Set<string>();
   for (const row of rows) {
-    if (
-      row.parentUuid !== null
-      && (row.type === "user" || row.type === "assistant")
-    ) {
+    if (row.parentUuid !== null && (row.type === "user" || row.type === "assistant")) {
       hasUserAssistantChild.add(row.parentUuid);
     }
   }
@@ -125,16 +110,14 @@ function buildActiveChain(rows: TranscriptRow[]): TranscriptRow[] {
       seen.add(current.uuid);
       if (current.type === "user" || current.type === "assistant") {
         if (
-          !hasUserAssistantChild.has(current.uuid)
-          && (!leaf || current.timestamp.localeCompare(leaf.timestamp) > 0)
+          !hasUserAssistantChild.has(current.uuid) &&
+          (!leaf || current.timestamp.localeCompare(leaf.timestamp) > 0)
         ) {
           leaf = current;
         }
         break;
       }
-      current = current.parentUuid
-        ? rowsByUuid.get(current.parentUuid)
-        : undefined;
+      current = current.parentUuid ? rowsByUuid.get(current.parentUuid) : undefined;
     }
   }
   if (!leaf) {
@@ -150,22 +133,16 @@ function buildActiveChain(rows: TranscriptRow[]): TranscriptRow[] {
     }
     seen.add(current.uuid);
     chain.push(current);
-    current = current.parentUuid
-      ? rowsByUuid.get(current.parentUuid)
-      : undefined;
+    current = current.parentUuid ? rowsByUuid.get(current.parentUuid) : undefined;
   }
 
   return recoverParallelToolRows(rows, chain.reverse(), seen);
 }
 
-function recoverParallelToolRows(
-  rows: TranscriptRow[],
-  chain: TranscriptRow[],
-  seen: Set<string>,
-): TranscriptRow[] {
+function recoverParallelToolRows(rows: TranscriptRow[], chain: TranscriptRow[], seen: Set<string>): TranscriptRow[] {
   const inserts = new Map<string, TranscriptRow[]>();
   const processedMessageIds = new Set<string>();
-  const assistantRows = chain.filter(row => row.type === "assistant");
+  const assistantRows = chain.filter((row) => row.type === "assistant");
   const anchorByMessageId = new Map<string, TranscriptRow>();
   for (const assistant of assistantRows) {
     const messageId = getMessageId(assistant);
@@ -182,18 +159,14 @@ function recoverParallelToolRows(
     processedMessageIds.add(messageId);
 
     const siblings = rows.filter(
-      row =>
-        row.type === "assistant"
-        && getMessageId(row) === messageId
-        && !seen.has(row.uuid),
+      (row) => row.type === "assistant" && getMessageId(row) === messageId && !seen.has(row.uuid),
     );
     const toolResults = rows.filter(
-      row =>
-        isToolResultRow(row)
-        && row.parentUuid !== null
-        && (row.parentUuid === assistant.uuid
-          || siblings.some(sibling => sibling.uuid === row.parentUuid))
-        && !seen.has(row.uuid),
+      (row) =>
+        isToolResultRow(row) &&
+        row.parentUuid !== null &&
+        (row.parentUuid === assistant.uuid || siblings.some((sibling) => sibling.uuid === row.parentUuid)) &&
+        !seen.has(row.uuid),
     );
 
     if (siblings.length > 0 || toolResults.length > 0) {
@@ -207,7 +180,7 @@ function recoverParallelToolRows(
     }
   }
 
-  return chain.flatMap(row => [row, ...(inserts.get(row.uuid) ?? [])]);
+  return chain.flatMap((row) => [row, ...(inserts.get(row.uuid) ?? [])]);
 }
 
 function compareByTimestamp(a: TranscriptRow, b: TranscriptRow): number {
@@ -230,10 +203,7 @@ export function isToolResultRow(row: TranscriptRow): boolean {
     return false;
   }
   const content = row.message["content"];
-  return (
-    Array.isArray(content)
-    && content.some(block => isRecord(block) && block["type"] === "tool_result")
-  );
+  return Array.isArray(content) && content.some((block) => isRecord(block) && block["type"] === "tool_result");
 }
 
 export function isHumanUserRow(row: TranscriptRow): boolean {
@@ -245,14 +215,16 @@ export function messageText(row: TranscriptRow): string {
   const content = row.message["content"];
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.map((block) => {
-    if (!isRecord(block)) return typeof block === "string" ? block : "";
-    if (typeof block["text"] === "string") return block["text"];
-    if (block["type"] === "tool_use" && isRecord(block["input"]) && typeof block["input"]["command"] === "string") {
-      return block["input"]["command"];
-    }
-    return "";
-  }).join("\n");
+  return content
+    .map((block) => {
+      if (!isRecord(block)) return typeof block === "string" ? block : "";
+      if (typeof block["text"] === "string") return block["text"];
+      if (block["type"] === "tool_use" && isRecord(block["input"]) && typeof block["input"]["command"] === "string") {
+        return block["input"]["command"];
+      }
+      return "";
+    })
+    .join("\n");
 }
 
 export type CondenseBoundary = { operationUserUuid: string; cutoffUuid: string };
@@ -261,8 +233,10 @@ export function findCondenseOperationBoundary(rows: TranscriptRow[]): CondenseBo
   const byUuid = new Map(rows.map((row) => [row.uuid, row]));
   const marker = [...rows].reverse().find((row) => {
     const text = messageText(row);
-    return /Base directory for this skill:\s*[\s\S]*[\\/]skills[\\/]condense\b/.test(text)
-      || /condense[\\/]src[\\/]condense\.ts\s+analyze\b/.test(text);
+    return (
+      /Base directory for this skill:\s*[\s\S]*[\\/]skills[\\/]condense\b/.test(text) ||
+      /condense[\\/]src[\\/]condense\.ts\s+analyze\b/.test(text)
+    );
   });
   if (!marker) throw new Error("Could not identify the active /condense operation turn.");
   let current: TranscriptRow | undefined = marker;
@@ -282,32 +256,30 @@ export function validateCondenseSuffix(rows: TranscriptRow[], cutoffUuid: string
   if (boundary.cutoffUuid !== cutoffUuid) throw new Error("Transcript changed after analyze; run /condense again.");
   const cutoffIndex = rows.findIndex((row) => row.uuid === cutoffUuid);
   if (cutoffIndex < 0) throw new Error("Receipt cutoff is no longer in the active transcript.");
-  const unexpected = rows.slice(cutoffIndex + 1).find((row) => isHumanUserRow(row) && row.uuid !== boundary.operationUserUuid);
+  const unexpected = rows
+    .slice(cutoffIndex + 1)
+    .find((row) => isHumanUserRow(row) && row.uuid !== boundary.operationUserUuid);
   if (unexpected) throw new Error("A real user message appeared after analyze; run /condense again.");
 }
 
 function getMessageId(row: TranscriptRow): string | null {
-  return isRecord(row.message) && typeof row.message["id"] === "string"
-    ? row.message["id"]
-    : null;
+  return isRecord(row.message) && typeof row.message["id"] === "string" ? row.message["id"] : null;
 }
 
 export function isTranscriptRow(value: unknown): value is TranscriptRow {
   return (
-    isRecord(value)
-    && typeof value["uuid"] === "string"
-    && (value["type"] === "user"
-      || value["type"] === "assistant"
-      || value["type"] === "attachment"
-      || value["type"] === "system")
+    isRecord(value) &&
+    typeof value["uuid"] === "string" &&
+    (value["type"] === "user" ||
+      value["type"] === "assistant" ||
+      value["type"] === "attachment" ||
+      value["type"] === "system")
   );
 }
 
-export async function readTranscriptEntries(
-  transcriptPath: string,
-): Promise<JsonRecord[]> {
+export async function readTranscriptEntries(transcriptPath: string): Promise<JsonRecord[]> {
   const content = await readFile(transcriptPath, "utf8");
-  const lines = content.split("\n").filter(line => line.trim() !== "");
+  const lines = content.split("\n").filter((line) => line.trim() !== "");
   const entries: JsonRecord[] = [];
   lines.forEach((line, i) => {
     try {

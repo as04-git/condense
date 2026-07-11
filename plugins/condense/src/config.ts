@@ -133,7 +133,12 @@ export function applyConfigValue(base: CondenseConfig, raw: unknown, path: strin
     if (!isRecord(raw["analysis"])) throw new Error(`${path}.analysis: expected an object`);
     assertKeys(raw["analysis"], ANALYSIS_KEYS, `${path}.analysis`);
     if (raw["analysis"]["maxPageChars"] !== undefined) {
-      next.analysis.maxPageChars = integer(raw["analysis"]["maxPageChars"], `${path}.analysis.maxPageChars`, 4000, 50000);
+      next.analysis.maxPageChars = integer(
+        raw["analysis"]["maxPageChars"],
+        `${path}.analysis.maxPageChars`,
+        4000,
+        50000,
+      );
     }
   }
   if (raw["retrieval"] !== undefined) {
@@ -141,9 +146,15 @@ export function applyConfigValue(base: CondenseConfig, raw: unknown, path: strin
     assertKeys(raw["retrieval"], RETRIEVAL_KEYS, `${path}.retrieval`);
     const r = raw["retrieval"];
     const intRules: Record<string, [number, number]> = {
-      defaultReadChars: [1, 200000], maxReadChars: [1, 200000], minQueryChars: [1, 100],
-      defaultContextLines: [0, 50], maxContextLines: [0, 50], defaultMatches: [1, 200],
-      maxMatches: [1, 200], maxExcerptChars: [1, 50000], maxRegexPatternChars: [1, 2000],
+      defaultReadChars: [1, 200000],
+      maxReadChars: [1, 200000],
+      minQueryChars: [1, 100],
+      defaultContextLines: [0, 50],
+      maxContextLines: [0, 50],
+      defaultMatches: [1, 200],
+      maxMatches: [1, 200],
+      maxExcerptChars: [1, 50000],
+      maxRegexPatternChars: [1, 2000],
       maxResponseChars: [1000, 200000],
     };
     for (const [key, value] of Object.entries(r)) {
@@ -157,24 +168,31 @@ export function applyConfigValue(base: CondenseConfig, raw: unknown, path: strin
       }
     }
   }
-  if (next.retrieval.defaultReadChars > next.retrieval.maxReadChars) throw new Error(`${path}: defaultReadChars must be <= maxReadChars`);
-  if (next.retrieval.defaultContextLines > next.retrieval.maxContextLines) throw new Error(`${path}: defaultContextLines must be <= maxContextLines`);
-  if (next.retrieval.defaultMatches > next.retrieval.maxMatches) throw new Error(`${path}: defaultMatches must be <= maxMatches`);
+  if (next.retrieval.defaultReadChars > next.retrieval.maxReadChars)
+    throw new Error(`${path}: defaultReadChars must be <= maxReadChars`);
+  if (next.retrieval.defaultContextLines > next.retrieval.maxContextLines)
+    throw new Error(`${path}: defaultContextLines must be <= maxContextLines`);
+  if (next.retrieval.defaultMatches > next.retrieval.maxMatches)
+    throw new Error(`${path}: defaultMatches must be <= maxMatches`);
   return next;
 }
 
 async function applyFile(base: CondenseConfig, path: string | null): Promise<CondenseConfig> {
   if (!path || !existsSync(path)) return base;
   let raw: unknown;
-  try { raw = JSON.parse(await readFile(path, "utf8")); }
-  catch (error) { throw new Error(`${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`); }
+  try {
+    raw = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    throw new Error(`${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`);
+  }
   return applyConfigValue(base, raw, path);
 }
 
 export async function loadConfig(projectCwd: string, overrides: ConfigOverrides = {}): Promise<CondenseConfig> {
   let config = await applyFile(DEFAULT_CONFIG, globalConfigPath());
   config = await applyFile(config, findProjectConfig(projectCwd));
-  if (overrides.keepTurns !== undefined) config.keepTurns = integer(overrides.keepTurns, "invocation.keepTurns", 0, 10000);
+  if (overrides.keepTurns !== undefined)
+    config.keepTurns = integer(overrides.keepTurns, "invocation.keepTurns", 0, 10000);
   for (const [key, value] of Object.entries(overrides.policies ?? {})) {
     config.policies[key as PolicyClass] = mode(value, `invocation.policies.${key}`);
   }

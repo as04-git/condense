@@ -7,26 +7,45 @@ import { parseBuildRequest, parseInspectRequest, parsePrepareDecision } from "..
 const created: string[] = [];
 const originalConfigHome = process.env["XDG_CONFIG_HOME"];
 afterEach(async () => {
-  if (originalConfigHome === undefined) delete process.env["XDG_CONFIG_HOME"]; else process.env["XDG_CONFIG_HOME"] = originalConfigHome;
+  if (originalConfigHome === undefined) delete process.env["XDG_CONFIG_HOME"];
+  else process.env["XDG_CONFIG_HOME"] = originalConfigHome;
   await Promise.all(created.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-async function temp(): Promise<string> { const path = await mkdtemp("/tmp/condense-config-"); created.push(path); return path; }
+async function temp(): Promise<string> {
+  const path = await mkdtemp("/tmp/condense-config-");
+  created.push(path);
+  return path;
+}
 
 describe("config", () => {
   test("loads built-in, global, nearest project, then invocation overrides", async () => {
-    const root = await temp(); const configHome = join(root, "config"); const project = join(root, "project", "nested");
+    const root = await temp();
+    const configHome = join(root, "config");
+    const project = join(root, "project", "nested");
     process.env["XDG_CONFIG_HOME"] = configHome;
-    await mkdir(join(configHome, "condense"), { recursive: true }); await mkdir(project, { recursive: true });
-    await Bun.write(join(configHome, "condense", "config.json"), JSON.stringify({ keepTurns: 2, policies: { tools: "keep-all" } }));
-    await Bun.write(join(root, "project", ".condense.json"), JSON.stringify({ policies: { thinking: "drop-all" }, retrieval: { defaultMatches: 3 } }));
+    await mkdir(join(configHome, "condense"), { recursive: true });
+    await mkdir(project, { recursive: true });
+    await Bun.write(
+      join(configHome, "condense", "config.json"),
+      JSON.stringify({ keepTurns: 2, policies: { tools: "keep-all" } }),
+    );
+    await Bun.write(
+      join(root, "project", ".condense.json"),
+      JSON.stringify({ policies: { thinking: "drop-all" }, retrieval: { defaultMatches: 3 } }),
+    );
     const config = await loadConfig(project, { keepTurns: 4, policies: { tools: "drop-ranked" } });
-    expect(config.keepTurns).toBe(4); expect(config.policies.tools).toBe("drop-ranked"); expect(config.policies.thinking).toBe("drop-all"); expect(config.retrieval.defaultMatches).toBe(3);
+    expect(config.keepTurns).toBe(4);
+    expect(config.policies.tools).toBe("drop-ranked");
+    expect(config.policies.thinking).toBe("drop-all");
+    expect(config.retrieval.defaultMatches).toBe(3);
   });
 
   test("fails clearly on unknown settings and inconsistent limits", () => {
     expect(() => applyConfigValue(DEFAULT_CONFIG, { typo: true }, "test.json")).toThrow("unknown setting");
-    expect(() => applyConfigValue(DEFAULT_CONFIG, { retrieval: { defaultReadChars: 20, maxReadChars: 10 } }, "test.json")).toThrow("defaultReadChars");
+    expect(() =>
+      applyConfigValue(DEFAULT_CONFIG, { retrieval: { defaultReadChars: 20, maxReadChars: 10 } }, "test.json"),
+    ).toThrow("defaultReadChars");
   });
 });
 

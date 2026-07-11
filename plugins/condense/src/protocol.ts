@@ -26,13 +26,18 @@ export type BuildRequest = { plan: string };
 export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
   if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
 }
 
 export function sha256(value: unknown): string {
-  return createHash("sha256").update(typeof value === "string" ? value : stableStringify(value)).digest("hex");
+  return createHash("sha256")
+    .update(typeof value === "string" ? value : stableStringify(value))
+    .digest("hex");
 }
 
 export function actionForMode(mode: RetentionMode): CandidateAction {
@@ -47,7 +52,8 @@ export function parsePrepareDecision(value: unknown): PrepareDecision {
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`unknown build field "${key}"`);
   const refs = (key: "keep" | "drop"): string[] => {
     const raw = value[key] ?? [];
-    if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) throw new Error(`${key} must be an array of refs`);
+    if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string"))
+      throw new Error(`${key} must be an array of refs`);
     if (new Set(raw).size !== raw.length) throw new Error(`${key} contains duplicate refs`);
     return raw as string[];
   };
@@ -56,8 +62,10 @@ export function parsePrepareDecision(value: unknown): PrepareDecision {
   const overlap = keep.find((ref) => drop.includes(ref));
   if (overlap) throw new Error(`ref ${overlap} appears in both keep and drop`);
   const title = value["title"];
-  if (typeof value["receipt"] !== "string" || !value["receipt"].trim()) throw new Error("build requires a receipt string from analyze");
-  if (title !== undefined && (typeof title !== "string" || !title.trim())) throw new Error("title must be a non-empty string");
+  if (typeof value["receipt"] !== "string" || !value["receipt"].trim())
+    throw new Error("build requires a receipt string from analyze");
+  if (title !== undefined && (typeof title !== "string" || !title.trim()))
+    throw new Error("title must be a non-empty string");
   return { receipt: value["receipt"], keep, drop, title: typeof title === "string" ? title.trim() : undefined };
 }
 
@@ -72,10 +80,12 @@ export function parseInspectRequest(value: unknown): InspectRequest {
   const cursor = value["cursor"];
   const refs = value["refs"];
   if (cursor !== undefined && typeof cursor !== "string") throw new Error("cursor must be a string");
-  if (refs !== undefined && (!Array.isArray(refs) || refs.some((ref) => typeof ref !== "string"))) throw new Error("refs must be an array of strings");
+  if (refs !== undefined && (!Array.isArray(refs) || refs.some((ref) => typeof ref !== "string")))
+    throw new Error("refs must be an array of strings");
   if (cursor !== undefined && refs !== undefined) throw new Error("cursor and refs are mutually exclusive");
   if (cursor === undefined && refs === undefined) throw new Error("inspect requires cursor or refs");
-  if (Array.isArray(refs) && (refs.length === 0 || refs.length > 20)) throw new Error("refs must contain between 1 and 20 refs");
+  if (Array.isArray(refs) && (refs.length === 0 || refs.length > 20))
+    throw new Error("refs must contain between 1 and 20 refs");
   return { receipt: value["receipt"], cursor, refs: refs as string[] | undefined };
 }
 

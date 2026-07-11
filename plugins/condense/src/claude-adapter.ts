@@ -1,7 +1,7 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { forkSession } from "@anthropic-ai/claude-agent-sdk";
 import type { ForkedSession, HostAdapter, SessionIdentity, SessionSnapshot } from "./host";
 import { sha256 } from "./protocol";
@@ -11,6 +11,7 @@ import {
   isTranscriptRow,
   readTranscriptEntries,
   selectActiveTranscriptRows,
+  validateCondenseSuffix,
   type JsonRecord,
   type TranscriptRow,
 } from "./transcript";
@@ -32,16 +33,21 @@ function projectCwdFor(rows: TranscriptRow[], cutoffUuid: string): string {
 }
 
 function sdkStorageView(entries: JsonRecord[], sessionId: string, cutoffUuid: string): JsonRecord[] {
-  const messages = entries.filter((entry) =>
-    SDK_MESSAGE_TYPES.has(String(entry["type"] ?? ""))
-    && entry["isSidechain"] !== true
-    && typeof entry["uuid"] === "string"
+  const messages = entries.filter(
+    (entry) =>
+      SDK_MESSAGE_TYPES.has(String(entry["type"] ?? "")) &&
+      entry["isSidechain"] !== true &&
+      typeof entry["uuid"] === "string",
   );
   const cutoffIndex = messages.findIndex((entry) => entry["uuid"] === cutoffUuid);
   if (cutoffIndex < 0) throw new Error(`cutoff row ${cutoffUuid} is not present in the SDK storage view`);
   const prefix = messages.slice(0, cutoffIndex + 1);
-  const replacements = entries.filter((entry) => entry["type"] === "content-replacement" && entry["sessionId"] === sessionId);
-  const relocated = [...entries].reverse().find((entry) => entry["type"] === "relocated" && entry["sessionId"] === sessionId);
+  const replacements = entries.filter(
+    (entry) => entry["type"] === "content-replacement" && entry["sessionId"] === sessionId,
+  );
+  const relocated = [...entries]
+    .reverse()
+    .find((entry) => entry["type"] === "relocated" && entry["sessionId"] === sessionId);
   return relocated ? [...prefix, ...replacements, relocated] : [...prefix, ...replacements];
 }
 
@@ -59,21 +65,31 @@ export class ClaudeCodeAdapter implements HostAdapter {
 
   locateCurrentSession(): SessionIdentity {
     const sessionId = process.env["CLAUDE_CODE_SESSION_ID"];
-    if (!sessionId) throw new Error("CLAUDE_CODE_SESSION_ID is not set — cannot locate the current session transcript.");
+    if (!sessionId)
+      throw new Error("CLAUDE_CODE_SESSION_ID is not set — cannot locate the current session transcript.");
     const matches = projectDirectories()
       .map((directory) => join(directory, `${sessionId}.jsonl`))
       .filter(existsSync);
-    if (matches.length === 0) throw new Error(`Transcript for session ${sessionId} was not found under ~/.claude/projects`);
+    if (matches.length === 0)
+      throw new Error(`Transcript for session ${sessionId} was not found under ~/.claude/projects`);
     if (matches.length > 1) {
-      matches.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
       const projectDir = process.env["CLAUDE_PROJECT_DIR"];
       if (projectDir) {
-        const matchingCwd = matches.filter((path) => dirname(path).includes(basename(projectDir)));
-        if (matchingCwd.length === 1) return { host: this.host, sessionId, transcriptPath: matchingCwd[0]!, projectCwd: projectDir };
+        const encodedProjectDirectory = join(homedir(), ".claude", "projects", projectDir.replace(/[\\/]/g, "-"));
+        const exact = matches.filter((path) => dirname(path) === encodedProjectDirectory);
+        if (exact.length === 1)
+          return { host: this.host, sessionId, transcriptPath: exact[0]!, projectCwd: projectDir };
       }
-      throw new Error(`Ambiguous session ${sessionId}: ${matches.length} transcripts exist; remove copied duplicates before condensing.`);
+      throw new Error(
+        `Ambiguous session ${sessionId}: ${matches.length} transcripts exist; remove copied duplicates before condensing.`,
+      );
     }
-    return { host: this.host, sessionId, transcriptPath: matches[0]!, projectCwd: process.env["CLAUDE_PROJECT_DIR"] || process.cwd() };
+    return {
+      host: this.host,
+      sessionId,
+      transcriptPath: matches[0]!,
+      projectCwd: process.env["CLAUDE_PROJECT_DIR"] || process.cwd(),
+    };
   }
 
   async snapshot(identity: SessionIdentity, expectedCutoffUuid?: string): Promise<SessionSnapshot> {
@@ -81,9 +97,7 @@ export class ClaudeCodeAdapter implements HostAdapter {
     const rows = entries.filter(isTranscriptRow);
     const active = selectActiveTranscriptRows(rows);
     const boundary = findCondenseOperationBoundary(active);
-    if (expectedCutoffUuid && boundary.cutoffUuid !== expectedCutoffUuid) {
-      throw new Error("Transcript changed after analyze; rerun /condense.");
-    }
+    if (expectedCutoffUuid) validateCondenseSuffix(active, expectedCutoffUuid);
     const cutoffIndex = active.findIndex((row) => row.uuid === boundary.cutoffUuid);
     if (cutoffIndex < 0) throw new Error("The condense cutoff is not in the active context.");
     const contextEntries = active.slice(0, cutoffIndex + 1);
