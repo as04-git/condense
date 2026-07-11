@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { ClaudeCodeAdapter } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG } from "../src/config";
@@ -11,7 +12,7 @@ import { isRecord, readTranscriptRows, type JsonRecord } from "../src/transcript
 import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
 
 const unique = randomUUID();
-const projectCwd = join(tmpdir(), `condense-integration-${unique}`);
+const projectCwd = join(realpathSync(tmpdir()), `condense-integration-${unique}`);
 const projectDir = join(homedir(), ".claude", "projects", projectCwd.replace(/[\\/]/g, "-"));
 const dataDirPromise = mkdtemp(join(tmpdir(), "condense-integration-data-"));
 const createdSessions = new Set<string>();
@@ -74,10 +75,7 @@ async function rawRows(path: string): Promise<JsonRecord[]> {
 }
 
 async function analyzePrepareBuild(path: string) {
-  const sessionId = path
-    .split("/")
-    .at(-1)!
-    .replace(/\.jsonl$/, "");
+  const sessionId = basename(path).replace(/\.jsonl$/, "");
   process.env["CLAUDE_CODE_SESSION_ID"] = sessionId;
   process.env["CLAUDE_PROJECT_DIR"] = projectCwd;
   const config = {
