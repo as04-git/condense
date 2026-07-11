@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { join, sep } from "node:path";
 import { runAnalyze } from "../src/analyze";
 import { DEFAULT_CONFIG } from "../src/config";
 import { buildAssistantTurns, type TranscriptRow } from "../src/transcript";
@@ -94,12 +95,14 @@ test("fails closed when the SDK omits fork lineage metadata", () => {
 });
 
 test("duplicate session IDs resolve only through the exact active project directory", () => {
-  const root = "/home/test/.claude/projects";
+  const root = join(sep, "home", "test", ".claude", "projects");
   const session = "same-id";
-  const matches = [`${root}/-work-one/${session}.jsonl`, `${root}/-work-two/${session}.jsonl`];
-  expect(resolveTranscriptMatch(session, matches, "/work/two", root)).toBe(matches[1]!);
+  const matches = [join(root, "-work-one", `${session}.jsonl`), join(root, "-work-two", `${session}.jsonl`)];
+  expect(resolveTranscriptMatch(session, matches, join(sep, "work", "two"), root)).toBe(matches[1]!);
   expect(() => resolveTranscriptMatch(session, matches, undefined, root)).toThrow("Ambiguous session");
-  expect(() => resolveTranscriptMatch(session, matches, "/work/missing", root)).toThrow("Ambiguous session");
+  expect(() => resolveTranscriptMatch(session, matches, join(sep, "work", "missing"), root)).toThrow(
+    "Ambiguous session",
+  );
 });
 
 test("large task notifications and errors are rankable with raw flags", () => {
