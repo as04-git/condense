@@ -32,15 +32,22 @@ function isClaudeCondenseMarker(row: TranscriptRow): boolean {
     );
   }
   if (row.type === "assistant") {
-    return row.message["content"].some(
-      (block) =>
-        isRecord(block) &&
-        block["type"] === "tool_use" &&
-        block["name"] === "Bash" &&
-        isRecord(block["input"]) &&
-        typeof block["input"]["command"] === "string" &&
-        /condense[\\/]src[\\/]condense\.ts\s+analyze\b/.test(block["input"]["command"]),
-    );
+    return row.message["content"].some((block) => {
+      if (
+        !isRecord(block) ||
+        block["type"] !== "tool_use" ||
+        block["name"] !== "Bash" ||
+        !isRecord(block["input"]) ||
+        typeof block["input"]["command"] !== "string"
+      ) {
+        return false;
+      }
+      const command = block["input"]["command"];
+      return (
+        /[\\/]src[\\/]condense\.ts["']?\s+analyze\b/.test(command) ||
+        /[\\/]src[\\/]bootstrap\.ts["']?\s+condense\s+(?:"[^"]*"|'[^']*'|\S+)\s+analyze\b/.test(command)
+      );
+    });
   }
   return false;
 }

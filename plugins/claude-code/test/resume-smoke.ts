@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ClaudeCodeAdapter } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
@@ -101,7 +102,7 @@ async function main(): Promise<void> {
 
   const fixtureId = randomUUID();
   const fixturePath = join(dirname(sourcePath), `${fixtureId}.jsonl`);
-  const dataRoot = await mkdtemp("/tmp/condense-resume-smoke-");
+  const dataRoot = await mkdtemp(join(tmpdir(), "condense-resume-smoke-"));
   let childPath = "";
   const previous = {
     session: process.env["CLAUDE_CODE_SESSION_ID"],

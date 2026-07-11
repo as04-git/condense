@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeCodeAdapter } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
@@ -11,9 +11,9 @@ import { isRecord, readTranscriptRows, type JsonRecord } from "../src/transcript
 import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
 
 const unique = randomUUID();
-const projectCwd = join("/tmp", `condense-integration-${unique}`);
-const projectDir = join(homedir(), ".claude", "projects", projectCwd.replaceAll("/", "-"));
-const dataDirPromise = mkdtemp("/tmp/condense-integration-data-");
+const projectCwd = join(tmpdir(), `condense-integration-${unique}`);
+const projectDir = join(homedir(), ".claude", "projects", projectCwd.replace(/[\\/]/g, "-"));
+const dataDirPromise = mkdtemp(join(tmpdir(), "condense-integration-data-"));
 const createdSessions = new Set<string>();
 const adapter = new ClaudeCodeAdapter();
 let tick = Date.now() - 100000;
@@ -56,7 +56,7 @@ function operationRows(sessionId: string, parentUuid: string): JsonRecord[] {
       type: "tool_use",
       id: `toolu_${randomUUID()}`,
       name: "Bash",
-      input: { command: "bun /tmp/plugin/condense/src/condense.ts analyze" },
+      input: { command: 'bun "/plugin/src/bootstrap.ts" condense "/data" analyze' },
     },
   ]);
   return [operation, skill, call];
@@ -137,7 +137,7 @@ afterAll(async () => {
   delete process.env["CLAUDE_PROJECT_DIR"];
 });
 
-describe("v0.3.1 SDK workflow", () => {
+describe("v0.3.2 SDK workflow", () => {
   test("preserves opaque entries and inactive branches while carrying searchable lineage", async () => {
     process.env["CONDENSE_DATA_HOME"] = await dataDirPromise;
     await mkdir(projectDir, { recursive: true });

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { hostname } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG, type RetentionMode } from "../src/config";
@@ -118,7 +118,7 @@ function row(type: "user" | "assistant", parentUuid: string | null, content: unk
 }
 
 beforeEach(async () => {
-  root = await mkdtemp("/tmp/condense-workflow-");
+  root = await mkdtemp(join(tmpdir(), "condense-workflow-"));
   process.env["CONDENSE_DATA_HOME"] = join(root, "data");
   process.env["CLAUDE_CODE_SESSION_ID"] = "00000000-0000-0000-0000-000000000001";
   const firstUser = row("user", null, "old work");
@@ -191,8 +191,10 @@ test("analyze and inspect paginate within the configured budget", async () => {
   }
   const stored = await loadAnalysisRecord(first.receipt);
   expect(seen.size).toBe(stored.candidates.filter((candidate) => candidate.action !== "none").length);
-  expect((await stat(join(root, "data", "pending"))).mode & 0o777).toBe(0o700);
-  expect((await stat(join(root, "data", "pending", `${first.receipt}.json`))).mode & 0o777).toBe(0o600);
+  if (process.platform !== "win32" && ((await stat(root)).mode & 0o777) !== 0o777) {
+    expect((await stat(join(root, "data", "pending"))).mode & 0o777).toBe(0o700);
+    expect((await stat(join(root, "data", "pending", `${first.receipt}.json`))).mode & 0o777).toBe(0o600);
+  }
   const detail = await inspectAnalysis(adapter, { receipt: first.receipt, refs: [String(first.reviewToKeep[0]![0])] });
   expect(JSON.stringify(detail).length).toBeLessThanOrEqual(4000);
 });

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "condense",
+  "displayName": "Condense",
+  "version": "0.3.2",
+  "description": "Lossless, recoverable, model-ranked context condensation for Claude Code.",
+  "author": {
+    "name": "Aryan Shrivastava",
+    "url": "https://github.com/as04-git"
+  },
+  "homepage": "https://github.com/as04-git/condense#readme",
+  "repository": "https://github.com/as04-git/condense",
+  "license": "BSD-3-Clause",
+  "keywords": ["claude-code", "context-management", "mcp", "compaction"]
+}

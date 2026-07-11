@@ -1,6 +1,6 @@
 {
-  "name": "condense",
-  "version": "0.3.1",
+  "name": "condense-claude-code",
+  "version": "0.3.2",
   "description": "Recoverable, model-ranked context condensation for Claude Code.",
   "type": "module",
   "author": "Aryan Shrivastava",
@@ -10,6 +10,7 @@
     "check": "biome check .",
     "format": "biome format --write src test",
     "test": "bun test",
+    "test:bootstrap": "bun run ./test/bootstrap-smoke.ts",
     "test:integration": "bun test ./test/integration.ts",
     "test:smoke": "bun run ./test/resume-smoke.ts",
     "typecheck": "tsc --noEmit"
@@ -24,6 +25,7 @@
     ".mcp.json",
     "bun.lock",
     "LICENSE.md",
+    "NOTICE.md",
     "skills",
     "src"
   ],

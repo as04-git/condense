@@ -40,7 +40,7 @@ test("finds the current operation once and returns its preceding cutoff", () => 
             type: "tool_use",
             id: "tool1",
             name: "Bash",
-            input: { command: "bun /x/condense/src/condense.ts analyze" },
+            input: { command: 'bun "/x/plugin/src/bootstrap.ts" condense "/x/data" analyze' },
           },
         ],
       },

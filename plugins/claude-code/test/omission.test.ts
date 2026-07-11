@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
 import { boundedMcpTextResponse, configForMcpResponse } from "../src/mcp-response";
@@ -19,7 +20,7 @@ import { pruneToolInputWithId } from "../src/prune";
 
 let root = "";
 beforeEach(async () => {
-  root = await mkdtemp("/tmp/condense-store-");
+  root = await mkdtemp(join(tmpdir(), "condense-store-"));
   process.env["CONDENSE_DATA_HOME"] = join(root, "data");
 });
 afterEach(async () => {
@@ -93,8 +94,10 @@ describe("read and search", () => {
     const id = newContentId();
     await saveOmissionObjects([makeOmissionObject(id, "secret")]);
     const path = join(root, "data", "objects", id.slice(3, 5), `${id}.json`);
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
-    expect((await stat(join(root, "data", "objects", id.slice(3, 5)))).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32" && ((await stat(root)).mode & 0o777) !== 0o777) {
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(root, "data", "objects", id.slice(3, 5)))).mode & 0o777).toBe(0o700);
+    }
     const json = JSON.parse(await readFile(path, "utf8"));
     json.value = "tampered";
     await Bun.write(path, JSON.stringify(json));

@@ -6,10 +6,14 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: plugins/condense
+        working-directory: plugins/claude-code
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -18,8 +22,10 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run typecheck
-      - run: bun test ./test/analyze-transcript.test.ts ./test/config-protocol.test.ts ./test/omission.test.ts ./test/workflow.test.ts
+      - run: bun test ./test/analyze-transcript.test.ts ./test/bootstrap.test.ts ./test/config-protocol.test.ts ./test/omission.test.ts ./test/workflow.test.ts
+      - run: bun run test:bootstrap
       - run: bun run test:integration
+      - run: bun pm pack --dry-run
       - name: Verify clean generated state
         working-directory: .
         run: git diff --exit-code

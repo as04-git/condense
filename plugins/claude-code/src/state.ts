@@ -34,7 +34,7 @@ export type AnalysisRecord = {
   type: "analysis";
   handle: string;
   createdAt: string;
-  producer: "condense@0.3.1";
+  producer: "condense@0.3.2";
   selectionAlgorithm: "claude-active-context-v1";
   source: StoredSource;
   config: CondenseConfig;
@@ -60,7 +60,7 @@ export type PreparedRecord = {
   handle: string;
   analysisHandle: string;
   createdAt: string;
-  producer: "condense@0.3.1";
+  producer: "condense@0.3.2";
   selectionAlgorithm: "claude-active-context-v1";
   source: StoredSource;
   config: CondenseConfig;
@@ -134,7 +134,7 @@ function parseRecord(raw: unknown, expected: PendingRecord["type"]): PendingReco
     raw["type"] !== expected ||
     typeof raw["handle"] !== "string" ||
     typeof raw["createdAt"] !== "string" ||
-    raw["producer"] !== "condense@0.3.1" ||
+    raw["producer"] !== "condense@0.3.2" ||
     raw["selectionAlgorithm"] !== "claude-active-context-v1" ||
     (expected === "prepared" &&
       (typeof raw["plannedContextDigest"] !== "string" || !Array.isArray(raw["plannedMutations"])))
@@ -161,7 +161,7 @@ export async function saveAnalysisRecord(
     type: "analysis",
     handle: randomHandle("cr"),
     createdAt: new Date().toISOString(),
-    producer: "condense@0.3.1",
+    producer: "condense@0.3.2",
     selectionAlgorithm: "claude-active-context-v1",
     ...input,
   };
@@ -178,7 +178,7 @@ export async function savePreparedRecord(
     type: "prepared",
     handle: randomHandle("bp"),
     createdAt: new Date().toISOString(),
-    producer: "condense@0.3.1",
+    producer: "condense@0.3.2",
     selectionAlgorithm: "claude-active-context-v1",
     ...input,
   };

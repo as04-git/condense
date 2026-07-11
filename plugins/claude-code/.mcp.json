@@ -3,7 +3,7 @@
     "condense": {
       "type": "stdio",
       "command": "bun",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/src/mcp.ts"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts", "mcp", "${CLAUDE_PLUGIN_DATA}"]
     }
   }
 }

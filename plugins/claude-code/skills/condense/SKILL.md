@@ -1,6 +1,6 @@
 ---
 name: condense
-description: Recoverably condense the current Claude Code session into a new session. Preserves all prose verbatim, externalizes selected structured payloads to searchable Content-IDs, and only drops signed thinking when explicitly selected by policy.
+description: Losslessly and recoverably condense the current Claude Code session into a new session. Preserves all prose verbatim, externalizes selected structured payloads to searchable Content-IDs, and only drops ephemeral signed thinking when explicitly selected by policy.
 argument-hint: "[keepTurns] [--thinking=MODE] [--tools=MODE] [--agent-results=MODE] [--skills=MODE] [--injections=MODE]"
 disable-model-invocation: true
 ---
@@ -14,7 +14,7 @@ The workflow is `analyze → inspect zero or more times → prepare → build`. 
 CLI:
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" analyze [arguments]
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" analyze [arguments]
 ```
 
 It locates the current transcript through `CLAUDE_CODE_SESSION_ID`, loads global/project config, identifies this operation turn, and returns an opaque `cr_` receipt plus bounded candidates.
@@ -58,13 +58,13 @@ Analyze deliberately omits a headline projection, percentage, token estimate, gr
 Use the returned cursor to page without losing stable ordering:
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" inspect '{"receipt":"cr_…","cursor":"p_12"}'
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" inspect '{"receipt":"cr_…","cursor":"p_12"}'
 ```
 
 Request deeper bounded evidence for up to 20 known refs when the initial row is insufficient:
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" inspect '{"receipt":"cr_…","refs":["o:…","t:…"]}'
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" inspect '{"receipt":"cr_…","refs":["o:…","t:…"]}'
 ```
 
 Cursor and refs are mutually exclusive. Inspect validates the frozen source. Hidden or uninspected candidates retain their safe policy defaults.
@@ -74,7 +74,7 @@ Cursor and refs are mutually exclusive. Inspect validates the frozen source. Hid
 Submit only refs whose defaults you are intentionally overriding, plus an optional title:
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" prepare '{"receipt":"cr_…","keep":["o:…","i:…"],"drop":["t:…"],"title":"optional description"}'
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" prepare '{"receipt":"cr_…","keep":["o:…","i:…"],"drop":["t:…"],"title":"optional description"}'
 ```
 
 Prepare is non-mutating apart from its private, expiring plan record. Review its decision audit in this order:
@@ -91,7 +91,7 @@ Do not label the plan good or bad. If the audit exposes a mistaken decision, cal
 After the audit matches the intended decisions, pass only the prepared plan handle:
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" build '{"plan":"bp_…"}'
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" build '{"plan":"bp_…"}'
 ```
 
 Build rejects stale plans, changed SDK source prefixes, changed active context, unexpected user activity, and SDK incompatibility. It applies exactly the frozen mutations and Content-IDs, then verifies the actual active-context character count equals prepare. Do not retry with guessed or weakened JSON; rerun analyze and prepare if validation fails.
@@ -111,7 +111,7 @@ The parent session remains unchanged. Omitted values are recoverable with bounde
 If the user asks about retained recovery storage, run this read-only report rather than estimating:
 
 ```bash
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" storage
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" storage
 ```
 
 Pass an explicit session ID as the final argument only when the user requests another lineage. Report exact bytes compactly. A lineage's `objectBytes` is attributable usage, not guaranteed reclaimable space, because other manifests may share those objects. Never delete recovery data without an explicit user request.

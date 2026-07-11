@@ -1,18 +1,17 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "condense-local",
-  "version": "0.3.1",
-  "description": "Local, recoverable model-ranked session condensation for Claude Code.",
+  "name": "condense",
+  "version": "0.3.2",
+  "description": "Host-specific distributions of lossless, recoverable context condensation for coding agents.",
   "owner": {
-    "name": "Aryan Shrivastava",
-    "email": "48136120+as04-git@users.noreply.github.com"
+    "name": "Aryan Shrivastava"
   },
   "plugins": [
     {
       "name": "condense",
-      "source": "./plugins/condense",
+      "source": "./plugins/claude-code",
       "category": "development",
-      "description": "In-session, model-ranked lossless context condensation. Keeps prose verbatim; ranks tool outputs (and thinking) to keep the important ones and prunes the rest to retrievable Content-IDs."
+      "description": "Claude Code distribution of Condense. Keeps prose verbatim and externalizes selected structured payloads to retrievable Content-IDs."
     }
   ]
 }
