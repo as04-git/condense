@@ -17,6 +17,19 @@ The skill follows `analyze → inspect* → prepare → build`:
 
 Retention classes are thinking, tools, agent results, skills, and injections. Modes are `keep-all`, `keep-ranked`, `drop-ranked`, and `drop-all`. Thinking and agent results default to explicit drop; recoverable tools/injections default to explicit keep.
 
+## Product and agent-experience compass
+
+- Treat agent context as a constrained product surface. Default output must contain decision signal, not protocol exhaust.
+- Use progressive disclosure: bounded initial evidence, optional inspect, then an exact audit. Payload size must not expand previews.
+- Separate decision quality from optimization pressure. Analyze must not lead with aggregate savings, percentages, token estimates, or recommendations; Prepare shows impact only after decisions exist.
+- Present irreversible effects before size impact. Thinking is not recoverable, so uncertainty always favors retaining it.
+- Preserve safe defaults for hidden or uninspected candidates. Do not force the agent to enumerate every candidate.
+- Hide internal record evolution behind short opaque handles. Omit unavailable optional fields instead of emitting `null`, heuristics, or cross-model conversions.
+- Prefer deterministic, build-verifiable accounting. Add token projections only when one trustworthy model-specific method and scope counts both source and projected contexts.
+- Keep host-specific discovery, transcript semantics, titles, markers, and publication in adapters. Keep retention policy and mutation planning host-neutral.
+- Fail closed on ambiguity or drift, but keep errors actionable and recoverable. Never weaken validation merely to complete a build.
+- Do not automate destructive lifecycle policy. Measure recovery storage compactly and let the user decide when historical recoverability is no longer valuable.
+
 ## Non-negotiable invariants
 
 - Thinking blocks are byte-identical or removed whole. Never edit signed thinking.
@@ -37,12 +50,14 @@ Retention classes are thinking, tools, agent results, skills, and injections. Mo
 ## Storage and retrieval
 
 - New data: `${XDG_DATA_HOME:-~/.local/share}/condense/{objects,manifests,pending}`.
-- Legacy reads: `~/.claude/condense-store`.
-- Directories are `0700`; files are `0600`; malformed data, hash failures, and ambiguous short-ID suffixes are errors.
+- Pre-0.3.1 private-alpha stores are unsupported; do not reintroduce compatibility code without an explicit product decision.
+- Directories are `0700`; files are `0600`; malformed data and hash failures are errors.
 - Pending `cr_` and `bp_` records expire after 24 hours and unsupported versions require a fresh analyze/prepare.
+- Receipt/plan locks record PID, host, and a random owner token. Reject live contention, recover a dead same-host owner, and reclaim malformed/foreign locks only after the record TTL. Release only a lock whose token still matches.
 - `read_omitted_content` is always bounded unless an explicit allowed length is supplied.
 - Complete MCP responses are bounded. `search_omitted_content` is literal by default and current-lineage scoped when IDs are omitted. Literal and explicit regex search use pinned RE2JS.
 - Exact active-context characters are the deterministic accounting unit. Do not add generic chars-per-token heuristics.
+- `bun src/condense.ts storage [session-id]` is read-only and reports exact overall file bytes plus attributable lineage object bytes/payload characters. Lineage bytes are not necessarily reclaimable because manifests may share objects. Do not delete automatically.
 
 ## Development
 

@@ -108,6 +108,14 @@ Report the actual character change and important kept/dropped tallies, then give
 
 The parent session remains unchanged. Omitted values are recoverable with bounded `read_omitted_content`; `search_omitted_content` searches the current multi-generation lineage by default and supports literal or explicit safe RE2 regex mode.
 
+If the user asks about retained recovery storage, run this read-only report rather than estimating:
+
+```bash
+bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" storage
+```
+
+Pass an explicit session ID as the final argument only when the user requests another lineage. Report exact bytes compactly. A lineage's `objectBytes` is attributable usage, not guaranteed reclaimable space, because other manifests may share those objects. Never delete recovery data without an explicit user request.
+
 ## Invariants
 
 - All genuine user prose and assistant text remain verbatim.
