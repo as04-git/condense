@@ -5,7 +5,7 @@ import { loadConfig } from "./config";
 import { boundedMcpTextResponse, configForMcpResponse } from "./mcp-response";
 import { readOmittedContent, searchOmittedContent } from "./omission";
 
-const server = new Server({ name: "condense", version: "0.3.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "condense", version: "0.3.1" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, () => ({
   tools: [

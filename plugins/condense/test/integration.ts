@@ -6,13 +6,7 @@ import { join } from "node:path";
 import { ClaudeCodeAdapter } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG } from "../src/config";
-import {
-  allocateOmission,
-  createEmptyCache,
-  loadManifest,
-  saveOmissionCache,
-  searchOmittedContent,
-} from "../src/omission";
+import { loadManifest, searchOmittedContent } from "../src/omission";
 import { isRecord, readTranscriptRows, type JsonRecord } from "../src/transcript";
 import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
 
@@ -139,33 +133,15 @@ afterAll(async () => {
   await rm(projectCwd, { recursive: true, force: true });
   await rm(await dataDirPromise, { recursive: true, force: true });
   delete process.env["CONDENSE_DATA_HOME"];
-  delete process.env["CONDENSE_LEGACY_STORE"];
   delete process.env["CLAUDE_CODE_SESSION_ID"];
   delete process.env["CLAUDE_PROJECT_DIR"];
 });
 
-describe("v0.3 SDK workflow", () => {
+describe("v0.3.1 SDK workflow", () => {
   test("preserves opaque entries and inactive branches while carrying searchable lineage", async () => {
     process.env["CONDENSE_DATA_HOME"] = await dataDirPromise;
-    const legacyDir = join(await dataDirPromise, "legacy");
-    process.env["CONDENSE_LEGACY_STORE"] = legacyDir;
     await mkdir(projectDir, { recursive: true });
     await mkdir(projectCwd, { recursive: true });
-    await mkdir(legacyDir, { recursive: true });
-    const legacyV1Session = "00000000-0000-0000-0000-aaaaaa111111";
-    const legacyV1Id = "aaaaaa111111:omitted-001";
-    await Bun.write(
-      join(legacyDir, `${legacyV1Session}.json`),
-      JSON.stringify({
-        version: 1,
-        nextId: 2,
-        entries: { [legacyV1Id]: { content: "generation-one-v1-keyword" } },
-      }),
-    );
-    const legacyV2Session = "00000000-0000-0000-0000-bbbbbb222222";
-    const legacyV2Cache = createEmptyCache();
-    const legacyV2Id = allocateOmission(legacyV2Cache, legacyV2Session, "generation-one-v2-keyword");
-    await saveOmissionCache(legacyV2Session, legacyV2Cache);
     const sourceId = randomUUID();
     createdSessions.add(sourceId);
     const sourcePath = join(projectDir, `${sourceId}.jsonl`);
@@ -182,21 +158,9 @@ describe("v0.3 SDK workflow", () => {
     });
     const firstUse = messageRow(sourceId, "assistant", firstUser["uuid"] as string, [
       { type: "tool_use", id: "toolu_generation1", name: "Bash", input: { command: "emit generation-one-keyword" } },
-      { type: "tool_use", id: "toolu_legacy_v1", name: "Bash", input: { command: "legacy v1" } },
-      { type: "tool_use", id: "toolu_legacy_v2", name: "Bash", input: { command: "legacy v2" } },
     ]);
     const firstResult = messageRow(sourceId, "user", firstUse["uuid"] as string, [
       { type: "tool_result", tool_use_id: "toolu_generation1", content: `generation-one-keyword\n${"a".repeat(1300)}` },
-      {
-        type: "tool_result",
-        tool_use_id: "toolu_legacy_v1",
-        content: `[condense: output omitted (25ch) — retrieve: ${legacyV1Id}]`,
-      },
-      {
-        type: "tool_result",
-        tool_use_id: "toolu_legacy_v2",
-        content: `[condense: output omitted (25ch) — retrieve: ${legacyV2Id}]`,
-      },
     ]);
     const signed = messageRow(sourceId, "assistant", firstResult["uuid"] as string, [
       { type: "thinking", thinking: "synthetic reasoning", signature: "synthetic-signed-thinking" },
@@ -259,14 +223,8 @@ describe("v0.3 SDK workflow", () => {
     const third = await analyzePrepareBuild(second.transcriptPath);
     expect(third.generation).toBe(3);
     const manifest = await loadManifest(third.sessionId);
-    expect(manifest?.contentIds.length).toBeGreaterThanOrEqual(5);
-    for (const keyword of [
-      "generation-one-keyword",
-      "generation-one-v1-keyword",
-      "generation-one-v2-keyword",
-      "generation-two-keyword",
-      "generation-three-keyword",
-    ]) {
+    expect(manifest?.contentIds.length).toBeGreaterThanOrEqual(3);
+    for (const keyword of ["generation-one-keyword", "generation-two-keyword", "generation-three-keyword"]) {
       const found = await searchOmittedContent({ query: keyword, config: DEFAULT_CONFIG, sessionId: third.sessionId });
       expect(found.matches.length).toBeGreaterThan(0);
     }

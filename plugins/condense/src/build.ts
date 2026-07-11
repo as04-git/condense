@@ -1,5 +1,5 @@
 import type { HostAdapter } from "./host";
-import { collectReferencedContentIds, saveManifest, saveV3Objects } from "./omission";
+import { collectReferencedContentIds, saveManifest, saveOmissionObjects } from "./omission";
 import { applyRetention, contextChars, contextContentDigest, convergeMarker } from "./planner";
 import { parseBuildRequest, sha256 } from "./protocol";
 import { loadAnalysisRecord, loadPreparedRecord, removePending, withPlanLock, withReceiptLock } from "./state";
@@ -13,7 +13,7 @@ import {
 import { revalidatePreparedSource } from "./workflow";
 
 export type BuildPublication = {
-  saveObjects: typeof saveV3Objects;
+  saveObjects: typeof saveOmissionObjects;
   saveLineageManifest: typeof saveManifest;
   publishSession(
     adapter: HostAdapter,
@@ -23,7 +23,7 @@ export type BuildPublication = {
 };
 
 const DEFAULT_PUBLICATION: BuildPublication = {
-  saveObjects: saveV3Objects,
+  saveObjects: saveOmissionObjects,
   saveLineageManifest: saveManifest,
   publishSession: (adapter, fork, storageEntries) => adapter.publish(fork, storageEntries),
 };

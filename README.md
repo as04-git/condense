@@ -105,7 +105,7 @@ Configuration is strict: unknown keys, invalid modes, and inconsistent limits ab
 
 ## Recovery
 
-New v3 objects live under `${XDG_DATA_HOME:-~/.local/share}/condense/objects` as directly addressable, sharded Content-IDs with user-only permissions. Their integrity hash covers the complete canonical envelope. Legacy v1/v2 `~/.claude/condense-store` caches and manifests remain read-only compatible.
+Omission objects live under `${XDG_DATA_HOME:-~/.local/share}/condense/objects` as directly addressable, sharded Content-IDs with user-only permissions. Their integrity hash covers the complete canonical envelope. Version 0.3.1 intentionally establishes a clean pre-public storage baseline and does not read the short-lived private alpha formats.
 
 ```text
 read_omitted_content(contentId, start?, length?)

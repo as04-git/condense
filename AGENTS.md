@@ -14,7 +14,7 @@ The skill follows `analyze → inspect* → prepare → build`:
 
 1. `analyze` loads strict configuration, snapshots the complete SDK fork-source prefix and active host context separately, and emits a bounded evidence page plus a `cr_` receipt.
 2. `inspect` optionally paginates or expands selected refs. It is a private CLI subcommand, not an MCP tool.
-3. `prepare` accepts `{receipt, keep, drop, title?}`, validates both source digests, assigns real v3 IDs, runs the exact planner, and returns a neutral audit plus a `bp_` handle. It does not fork or publish omission data.
+3. `prepare` accepts `{receipt, keep, drop, title?}`, validates both source digests, assigns the real Content-IDs, runs the exact planner, and returns a neutral audit plus a `bp_` handle. It does not fork or publish omission data.
 4. `build` accepts only `{plan}`, revalidates the frozen boundary, forks to the sealed cutoff, applies exactly the prepared mutations, publishes objects/manifest/transcript in that order, and asserts the active-context character count equals the dry run.
 
 Retention classes are thinking, tools, agent results, skills, and injections. Modes are `keep-all`, `keep-ranked`, `drop-ranked`, and `drop-all`. Thinking and agent results default to explicit drop; recoverable tools/injections default to explicit keep.
@@ -32,7 +32,7 @@ Retention classes are thinking, tools, agent results, skills, and injections. Mo
 - Both `custom-title` and `agent-name` rows are emitted for the new session.
 - Multi-leaf SDK output is tolerated. The marker is parented to the mapped cutoff or nearest surviving ancestor and has the newest timestamp.
 - Prior markers are removed. Marker rows never participate in semantic turns, prompt anchors, or titles.
-- New v3 objects contain typed exact JSON values, a hash over the complete canonical envelope, and bounded provenance. Legacy v1/v2 stores are read-only compatible.
+- Omission objects contain typed exact JSON values, a hash over the complete canonical envelope, and bounded provenance. Pre-0.3.1 private-alpha stores are intentionally unsupported.
 - Store/manifest files publish before the transcript; a crash may orphan data but may not publish broken placeholders.
 - Lineage manifests collect only IDs in condense-owned structured placeholder locations, never ID-shaped prose.
 

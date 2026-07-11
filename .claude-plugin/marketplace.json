@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "condense-local",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local, recoverable model-ranked session condensation for Claude Code.",
   "owner": {
     "name": "Aryan Shrivastava",

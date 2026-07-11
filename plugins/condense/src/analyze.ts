@@ -15,7 +15,7 @@ import type { AnalysisRecord } from "./state";
 const OUTPUT_FLOOR_CHARS = 1000;
 const INITIAL_EVIDENCE_CHARS = 160;
 const DEEP_EVIDENCE_CHARS = 1200;
-const PLACEHOLDER_ID = `c3_${"0".repeat(22)}`;
+const PLACEHOLDER_ID = `co_${"0".repeat(22)}`;
 
 type AttachmentClass = Exclude<PolicyClass, "thinking">;
 type Op = { id: string; turn: number; sequence: number; name: string; target: string };

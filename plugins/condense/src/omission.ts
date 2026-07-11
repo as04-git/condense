@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, link, mkdir, open, readdir, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, open, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { RE2JS } from "re2js";
@@ -9,18 +9,15 @@ import { sha256, stableStringify } from "./protocol";
 import { isRecord, type JsonRecord } from "./transcript";
 
 export type OmissionKind = "tool-output" | "tool-input" | "agent-result" | "skill" | "injected";
-export type OmissionEntry = {
-  kind: OmissionKind;
-  value: unknown;
-  metadata: Record<string, unknown>;
-  renderedLength: number;
-  sha256: string;
+export type OmissionManifest = {
+  schema: "condense-manifest";
+  version: 1;
+  sessionId: string;
+  contentIds: string[];
 };
-export type OmissionCache = { version: 2; nextId: number; entries: Record<string, OmissionEntry> };
-type LegacyCache = { version: 1; nextId: number; entries: Record<string, { content: string }> };
-export type OmissionManifest = { version?: 3; sessionId: string; contentIds: string[] };
-export type V3OmissionObject = {
-  version: 3;
+export type OmissionObject = {
+  schema: "condense-object";
+  version: 1;
   id: string;
   kind: OmissionKind;
   value: unknown;
@@ -35,29 +32,15 @@ function dataRoot(): string {
     join(process.env["XDG_DATA_HOME"] || join(homedir(), ".local", "share"), "condense")
   );
 }
-function sessionsDir(): string {
-  return join(dataRoot(), "sessions");
-}
 function manifestsDir(): string {
   return join(dataRoot(), "manifests");
 }
 function objectsDir(): string {
   return join(dataRoot(), "objects");
 }
-function sessionPath(sessionId: string): string {
-  return join(sessionsDir(), `${sessionId}.json`);
-}
 function manifestPath(sessionId: string): string {
   return join(manifestsDir(), `${sessionId}.json`);
 }
-function legacyDir(): string {
-  return process.env["CONDENSE_LEGACY_STORE"] || join(homedir(), ".claude", "condense-store");
-}
-
-export function createEmptyCache(): OmissionCache {
-  return { version: 2, nextId: 1, entries: {} };
-}
-
 async function readJson(path: string): Promise<unknown | null> {
   const file = Bun.file(path);
   if (!(await file.exists())) return null;
@@ -66,20 +49,6 @@ async function readJson(path: string): Promise<unknown | null> {
   } catch (error) {
     throw new Error(`Malformed condense store ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
-
-function isV2(value: unknown): value is OmissionCache {
-  return isRecord(value) && value["version"] === 2 && typeof value["nextId"] === "number" && isRecord(value["entries"]);
-}
-function isV1(value: unknown): value is LegacyCache {
-  return isRecord(value) && value["version"] === 1 && typeof value["nextId"] === "number" && isRecord(value["entries"]);
-}
-
-export async function loadOmissionCache(sessionId: string): Promise<OmissionCache> {
-  const value = await readJson(sessionPath(sessionId));
-  if (value === null) return createEmptyCache();
-  if (!isV2(value)) throw new Error(`Unsupported condense store schema for session ${sessionId}`);
-  return value;
 }
 
 async function atomicJson(path: string, value: unknown): Promise<void> {
@@ -99,13 +68,10 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   await chmod(path, 0o600);
 }
 
-export async function saveOmissionCache(sessionId: string, cache: OmissionCache): Promise<void> {
-  await atomicJson(sessionPath(sessionId), cache);
-}
-
 export async function saveManifest(sessionId: string, contentIds: string[]): Promise<void> {
   await atomicJson(manifestPath(sessionId), {
-    version: 3,
+    schema: "condense-manifest",
+    version: 1,
     sessionId,
     contentIds: [...new Set(contentIds)].sort(),
   } satisfies OmissionManifest);
@@ -116,7 +82,8 @@ export async function loadManifest(sessionId: string): Promise<OmissionManifest 
   if (value === null) return null;
   if (
     !isRecord(value) ||
-    (value["version"] !== undefined && value["version"] !== 3) ||
+    value["schema"] !== "condense-manifest" ||
+    value["version"] !== 1 ||
     value["sessionId"] !== sessionId ||
     !Array.isArray(value["contentIds"]) ||
     value["contentIds"].some((id) => typeof id !== "string")
@@ -143,12 +110,18 @@ function boundedMetadata(metadata: Record<string, unknown>): Record<string, unkn
   return result;
 }
 
-function v3EnvelopeHash(entry: Omit<V3OmissionObject, "sha256">): string {
+function envelopeHash(entry: Omit<OmissionObject, "sha256">): string {
   return sha256(stableStringify(entry));
 }
 
+const CONTENT_ID = /^co_[A-Za-z0-9_-]{22}$/;
+
+export function isContentId(value: string): boolean {
+  return CONTENT_ID.test(value);
+}
+
 export function newContentId(): string {
-  return `c3_${randomBytes(16).toString("base64url")}`;
+  return `co_${randomBytes(16).toString("base64url")}`;
 }
 
 export async function newAvailableContentId(): Promise<string> {
@@ -156,31 +129,32 @@ export async function newAvailableContentId(): Promise<string> {
     const id = newContentId();
     if (!(await Bun.file(objectPath(id)).exists())) return id;
   }
-  throw new Error("Could not allocate a collision-free v3 Content-ID");
+  throw new Error("Could not allocate a collision-free Content-ID");
 }
 
-export function makeV3Object(
+export function makeOmissionObject(
   id: string,
   value: unknown,
   options: { kind?: OmissionKind; metadata?: Record<string, unknown> } = {},
-): V3OmissionObject {
-  if (!/^c3_[A-Za-z0-9_-]{22}$/.test(id)) throw new Error(`Invalid v3 Content-ID ${id}`);
-  const base: Omit<V3OmissionObject, "sha256"> = {
-    version: 3,
+): OmissionObject {
+  if (!isContentId(id)) throw new Error(`Invalid Content-ID ${id}`);
+  const base: Omit<OmissionObject, "sha256"> = {
+    schema: "condense-object",
+    version: 1,
     id,
     kind: options.kind ?? "tool-output",
     value,
     metadata: boundedMetadata(options.metadata ?? {}),
     renderedLength: renderOmissionValue(value).length,
   };
-  return { ...base, sha256: v3EnvelopeHash(base) };
+  return { ...base, sha256: envelopeHash(base) };
 }
 
 function objectPath(id: string): string {
   return join(objectsDir(), id.slice(3, 5), `${id}.json`);
 }
 
-export async function saveV3Objects(objects: V3OmissionObject[]): Promise<void> {
+export async function saveOmissionObjects(objects: OmissionObject[]): Promise<void> {
   for (const object of objects) {
     const path = objectPath(object.id);
     const directory = dirname(path);
@@ -210,129 +184,42 @@ export function omissionNotice(description: string, length: number, contentId: s
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 180);
-  return `[condense:v3 ${contentId} ${length}ch | ${safe}]`;
+  return `[condense ${contentId} ${length}ch | ${safe}]`;
 }
 
-export type ParsedNotice = { version: 3 | "legacy"; contentId: string };
-const V3_NOTICE = /^\[condense:v3 (c3_[A-Za-z0-9_-]{22}) \d+ch \| [^\]\r\n]{1,180}\]$/;
-const LEGACY_NOTICE = /^\[condense: [\s\S]+ \(\d+ch\) — retrieve: ([0-9a-fA-F]{12}:omitted-\d+)\]$/;
-const LEGACY_SKILL_NOTICE =
-  /^\[Skill "[^"]+" output \(\d+ chars\) omitted by condense\. Re-invoke \/[^;\]]+; fallback retrieve: ([0-9a-fA-F]{12}:omitted-\d+)\]$/;
+export type ParsedNotice = { contentId: string };
+const NOTICE = /^\[condense (co_[A-Za-z0-9_-]{22}) \d+ch \| [^\]\r\n]{1,180}\]$/;
 
 export function parseOmissionNotice(text: string): ParsedNotice | null {
-  const v3 = text.match(V3_NOTICE);
-  if (v3?.[1]) return { version: 3, contentId: v3[1] };
-  const legacy = text.match(LEGACY_NOTICE) ?? text.match(LEGACY_SKILL_NOTICE);
-  return legacy?.[1] ? { version: "legacy", contentId: legacy[1] } : null;
+  const match = text.match(NOTICE);
+  return match?.[1] ? { contentId: match[1] } : null;
 }
 
-export function allocateOmission(
-  cache: OmissionCache,
-  sessionId: string,
-  value: unknown,
-  options: { kind?: OmissionKind; metadata?: Record<string, unknown> } = {},
-): string {
-  const contentId = `${sessionId.slice(-12)}:omitted-${cache.nextId.toString().padStart(3, "0")}`;
-  cache.nextId++;
-  const rendered = renderOmissionValue(value);
-  cache.entries[contentId] = {
-    kind: options.kind ?? "tool-output",
-    value,
-    metadata: options.metadata ?? {},
-    renderedLength: rendered.length,
-    sha256: sha256(stableStringify(value)),
-  };
-  return contentId;
-}
+type ResolvedEntry = { contentId: string; entry: OmissionObject };
 
-type ResolvedEntry = { contentId: string; entry: OmissionEntry; legacy: boolean; version: 1 | 2 | 3 };
-
-async function candidateFiles(directory: string, suffix: string): Promise<string[]> {
-  try {
-    return (await readdir(directory))
-      .filter((name) => name.endsWith(`${suffix}.json`))
-      .map((name) => join(directory, name));
-  } catch {
-    return [];
+async function resolveEntry(contentId: string): Promise<ResolvedEntry | null> {
+  if (!isContentId(contentId)) return null;
+  const value = await readJson(objectPath(contentId));
+  if (value === null) return null;
+  if (
+    !isRecord(value) ||
+    value["schema"] !== "condense-object" ||
+    value["version"] !== 1 ||
+    value["id"] !== contentId ||
+    typeof value["kind"] !== "string" ||
+    !("value" in value) ||
+    !isRecord(value["metadata"]) ||
+    typeof value["renderedLength"] !== "number" ||
+    typeof value["sha256"] !== "string"
+  ) {
+    throw new Error(`Malformed condense object ${contentId}`);
   }
-}
-
-type RequestCache = Map<string, Promise<unknown | null>>;
-
-async function cachedJson(path: string, cache?: RequestCache): Promise<unknown | null> {
-  if (!cache) return readJson(path);
-  let pending = cache.get(path);
-  if (!pending) {
-    pending = readJson(path);
-    cache.set(path, pending);
-  }
-  return pending;
-}
-
-async function resolveEntry(contentId: string, cache?: RequestCache): Promise<ResolvedEntry | null> {
-  if (/^c3_[A-Za-z0-9_-]{22}$/.test(contentId)) {
-    const value = await cachedJson(objectPath(contentId), cache);
-    if (value === null) return null;
-    if (
-      !isRecord(value) ||
-      value["version"] !== 3 ||
-      value["id"] !== contentId ||
-      typeof value["kind"] !== "string" ||
-      !("value" in value) ||
-      !isRecord(value["metadata"]) ||
-      typeof value["renderedLength"] !== "number" ||
-      typeof value["sha256"] !== "string"
-    ) {
-      throw new Error(`Malformed v3 condense object ${contentId}`);
-    }
-    const object = value as V3OmissionObject;
-    const { sha256: expected, ...base } = object;
-    if (v3EnvelopeHash(base) !== expected) throw new Error(`Integrity check failed for Content-ID ${contentId}`);
-    if (renderOmissionValue(object.value).length !== object.renderedLength)
-      throw new Error(`Rendered-length check failed for Content-ID ${contentId}`);
-    return {
-      contentId,
-      legacy: false,
-      version: 3,
-      entry: {
-        kind: object.kind,
-        value: object.value,
-        metadata: object.metadata,
-        renderedLength: object.renderedLength,
-        sha256: object.sha256,
-      },
-    };
-  }
-  const match = contentId.match(/^([0-9a-fA-F]{12}):omitted-\d+$/);
-  if (!match) return null;
-  const suffix = match[1]!;
-  const paths = [...(await candidateFiles(sessionsDir(), suffix)), ...(await candidateFiles(legacyDir(), suffix))];
-  const found: ResolvedEntry[] = [];
-  for (const path of paths) {
-    const value = await cachedJson(path, cache);
-    if (isV2(value) && value.entries[contentId])
-      found.push({ contentId, entry: value.entries[contentId]!, legacy: false, version: 2 });
-    else if (isV1(value) && value.entries[contentId]) {
-      const content = value.entries[contentId]!.content;
-      found.push({
-        contentId,
-        legacy: true,
-        version: 1,
-        entry: {
-          kind: "tool-output",
-          value: content,
-          metadata: { legacy: true },
-          renderedLength: content.length,
-          sha256: sha256(stableStringify(content)),
-        },
-      });
-    }
-  }
-  if (found.length > 1) throw new Error(`Ambiguous Content-ID ${contentId}: multiple session stores match its suffix`);
-  const result = found[0] ?? null;
-  if (result && sha256(stableStringify(result.entry.value)) !== result.entry.sha256)
-    throw new Error(`Integrity check failed for Content-ID ${contentId}`);
-  return result;
+  const object = value as OmissionObject;
+  const { sha256: expected, ...base } = object;
+  if (envelopeHash(base) !== expected) throw new Error(`Integrity check failed for Content-ID ${contentId}`);
+  if (renderOmissionValue(object.value).length !== object.renderedLength)
+    throw new Error(`Rendered-length check failed for Content-ID ${contentId}`);
+  return { contentId, entry: object };
 }
 
 export async function readOmittedContent(
@@ -368,7 +255,6 @@ export async function readOmittedContent(
     nextStart: end < rendered.length ? end : null,
     truncated: end < rendered.length,
     text: rendered.slice(start, end),
-    legacy: resolved.legacy,
   };
 }
 
@@ -433,14 +319,12 @@ export async function searchOmittedContent(args: {
   if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string"))
     throw new Error("contentIds must be an array of strings");
   if (ids.length > 500) throw new Error("contentIds may contain at most 500 IDs");
-  if (ids.some((id) => !/^c3_[A-Za-z0-9_-]{22}$/.test(id) && !/^[0-9a-fA-F]{12}:omitted-\d+$/.test(id)))
-    throw new Error("contentIds contains an invalid Content-ID");
+  if (ids.some((id) => !isContentId(id))) throw new Error("contentIds contains an invalid Content-ID");
   const caseSensitive = args.caseSensitive ?? config.caseSensitive;
   const results: JsonRecord[] = [];
   const missingContentIds: string[] = [];
   let responseChars = 0;
   let responseTruncated = false;
-  const requestCache: RequestCache = new Map();
   const addResult = (result: JsonRecord): boolean => {
     const serialized = JSON.stringify(result).length;
     if (responseChars + serialized > config.maxResponseChars) {
@@ -452,7 +336,7 @@ export async function searchOmittedContent(args: {
     return true;
   };
   for (const contentId of [...new Set(ids)]) {
-    const resolved = await resolveEntry(contentId, requestCache);
+    const resolved = await resolveEntry(contentId);
     if (!resolved) {
       missingContentIds.push(contentId);
       continue;
@@ -569,14 +453,4 @@ export function collectReferencedContentIds(rows: JsonRecord[]): string[] {
     }
   }
   return [...ids].sort();
-}
-
-export function inputOmissionNotice(description: string, length: number, contentId: string): string {
-  return `[condense: ${description} (${length}ch) — retrieve: ${contentId}]`;
-}
-export function outputOmissionNotice(description: string, length: number, contentId: string): string {
-  return inputOmissionNotice(description, length, contentId);
-}
-export function noticeOverhead(description: string): number {
-  return 12 + description.length + 60;
 }

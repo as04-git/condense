@@ -1,4 +1,4 @@
-import { collectReferencedContentIds, makeV3Object, omissionNotice, type V3OmissionObject } from "./omission";
+import { collectReferencedContentIds, makeOmissionObject, omissionNotice, type OmissionObject } from "./omission";
 import { pruneToolInputWithId } from "./prune";
 import { sha256, type CandidateManifestItem, type PrepareDecision } from "./protocol";
 import { isRecord, isToolResultRow, type JsonRecord, type TranscriptRow } from "./transcript";
@@ -13,7 +13,7 @@ export type RetentionCounts = {
 export type AppliedRetention = {
   rows: TranscriptRow[];
   droppedRows: Set<string>;
-  objects: V3OmissionObject[];
+  objects: OmissionObject[];
   mutations: PlannedMutation[];
   counts: RetentionCounts;
   droppedThinkingTurns: Set<number>;
@@ -179,7 +179,7 @@ export function applyRetention(args: {
   const rows = structuredClone(args.rows) as TranscriptRow[];
   const candidates = new Map(args.candidates.map((candidate) => [candidate.ref, candidate]));
   const counts = emptyCounts();
-  const objects: V3OmissionObject[] = [];
+  const objects: OmissionObject[] = [];
   const mutations: PlannedMutation[] = [];
   const droppedRows = new Set<string>();
   const droppedThinkingTurns = new Set<number>();
@@ -249,7 +249,7 @@ export function applyRetention(args: {
         if (!measured) throw new Error(`Prepared tool-input mutation no longer applies to ${candidate.ref}`);
         recordMutation(candidate, false, measured, contentId);
         objects.push(
-          makeV3Object(contentId, measured.mutation.value, {
+          makeOmissionObject(contentId, measured.mutation.value, {
             kind: measured.mutation.kind,
             metadata: measured.mutation.metadata,
           }),
@@ -275,7 +275,7 @@ export function applyRetention(args: {
         recordMutation(candidate, false, measured, contentId);
         const input = maps.inputs.get(block["tool_use_id"]);
         objects.push(
-          makeV3Object(contentId, value, {
+          makeOmissionObject(contentId, value, {
             kind: candidate.kind === "agent-result" ? "agent-result" : "tool-output",
             metadata: {
               toolName: maps.names.get(block["tool_use_id"]) ?? "?",
@@ -304,7 +304,7 @@ export function applyRetention(args: {
       const measured = injectionMutation(value, candidate.notice, candidate.size, contentId);
       recordMutation(candidate, false, measured, contentId);
       objects.push(
-        makeV3Object(contentId, value, {
+        makeOmissionObject(contentId, value, {
           kind: candidate.kind === "skill" ? "skill" : "injected",
           metadata: { rowUuid: originalUuid, label: candidate.label },
         }),

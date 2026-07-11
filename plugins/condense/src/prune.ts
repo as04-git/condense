@@ -6,15 +6,13 @@
 //       (a floor, so tiny inputs like a filepath never clutter the candidate
 //       list or get a Content-ID), and
 //   (b) force-prunes a specific tool_use's big input to a retrievable
-//       Content-ID once the caller (build.ts, per the chosen mode) has decided
+//       Content-ID once the planner has decided
 //       to shed it.
-// Tool OUTPUTS are handled entirely in build.ts (applyToolOutputMode); there is
-// no output pruning here and no threshold governs any keep/drop decision.
+// Tool outputs are handled by the shared planner; no threshold governs a
+// keep/drop decision.
 
-import { allocateOmission, inputOmissionNotice, noticeOverhead, omissionNotice, parseOmissionNotice } from "./omission";
+import { omissionNotice, parseOmissionNotice } from "./omission";
 import { isRecord, type JsonRecord } from "./transcript";
-
-type OmissionCache = Parameters<typeof allocateOmission>[0];
 
 // Below this a tool input isn't worth turning into a Content-ID; such inputs
 // are always kept verbatim and never appear as ranking candidates.
@@ -119,48 +117,6 @@ export function bigInputSize(block: unknown): number {
   if (!spec) return 0;
   const size = specSize(spec, ti.input);
   return size >= INPUT_FLOOR_CHARS ? size : 0;
-}
-
-// Force-prune a tool_use block's big input to a retrievable Content-ID. Returns
-// the pruned size, or 0 if the block was not a prunable candidate. No threshold
-// governs the decision here — the caller already ranked this input for removal.
-export function pruneToolInput(block: JsonRecord, cache: OmissionCache, sessionId: string): number {
-  const ti = toolInput(block);
-  if (!ti) return 0;
-  const spec = INPUT_SPECS[ti.name];
-  if (!spec) return 0;
-  const size = specSize(spec, ti.input);
-  if (size < INPUT_FLOOR_CHARS) return 0;
-  const desc = spec.descriptionFn(ti.input);
-  if (noticeOverhead(desc) >= size) return 0;
-
-  if (spec.kind === "truncate") {
-    const command = stringifyContent(ti.input[spec.field]);
-    const contentId = allocateOmission(cache, sessionId, command, {
-      kind: "tool-input",
-      metadata: { toolName: ti.name, field: spec.field },
-    });
-    ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
-    ti.input[`${spec.field}_omission_notice`] = inputOmissionNotice(desc, command.length, contentId);
-    return size;
-  }
-
-  const fields = Object.fromEntries(spec.fields.map((field) => [field, ti.input[field]]));
-  const combined = spec.fields.map((f) => stringifyContent(ti.input[f])).join("\n");
-  const contentId = allocateOmission(cache, sessionId, fields, {
-    kind: "tool-input",
-    metadata: {
-      toolName: ti.name,
-      fields: [...spec.fields],
-      path:
-        typeof (ti.input["file_path"] ?? ti.input["notebook_path"]) === "string"
-          ? (ti.input["file_path"] ?? ti.input["notebook_path"])
-          : undefined,
-    },
-  });
-  for (const f of spec.fields) ti.input[f] = "[Omitted by condense]";
-  ti.input[`${spec.fields.join("_")}_omission_notice`] = inputOmissionNotice(desc, combined.length, contentId);
-  return size;
 }
 
 export function pruneToolInputWithId(
