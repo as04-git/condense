@@ -77,3 +77,5 @@ claude plugin validate .
 Then update `condense@condense`, launch a fresh Claude process, resume a disposable condensed session, and verify title/banner, marker, bounded read, literal/regex lineage search, and repeated condensation.
 
 Never commit private real-session fixtures. Commit only minimized synthetic fixtures. Preserve the configured GitHub noreply commit identity; never override it with an injected account or billing email.
+
+Dependencies are exact-pinned and monitored weekly by Dependabot. Do not auto-merge dependency PRs. Treat every Claude Agent SDK update as compatibility work: inspect upstream changes and rerun the full matrix plus disposable resume smoke when fork, project-key, transcript, or native-binary behavior may have changed.

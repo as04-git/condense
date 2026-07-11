@@ -264,6 +264,8 @@ bun run test:integration
 
 The unit suite uses minimized synthetic fixtures. Integration tests create disposable Claude sessions and exercise the real SDK fork, signature preservation, parent chains, inactive branches, opaque storage entries, titles, repeated condensation, and lineage retrieval. CI runs the unit, clean-bootstrap, SDK integration, type, format, and package checks on Linux, macOS, and Windows. The authenticated resume smoke has been exercised on Linux/WSL2.
 
+Dependencies and Actions are exact-pinned. Weekly Dependabot checks both Bun manifests together by dependency name and checks GitHub Actions separately. Update PRs are intentionally not auto-merged: every change must pass the full platform matrix, and Claude Agent SDK updates additionally require review of fork, project-key, transcript-selection, and cleanup behavior. A Dependabot PR is the maintenance queue; a second issue-creation bot would duplicate it without adding signal.
+
 An authenticated resume check is opt-in and never runs in CI. Point it at a disposable-capable real transcript with at least one eligible payload; the harness copies it to throwaway IDs and removes the fixture, child, and private store afterward:
 
 ```bash
