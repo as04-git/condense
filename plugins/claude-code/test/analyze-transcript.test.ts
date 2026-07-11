@@ -108,6 +108,8 @@ test("duplicate session IDs resolve only through the exact active project direct
 
 test("Claude project path encoding handles Windows drive paths", () => {
   expect(encodeClaudeProjectPath("C:\\Users\\aryan\\project")).toBe("C--Users-aryan-project");
+  expect(encodeClaudeProjectPath("/work/a.b")).toBe("-work-a-b");
+  expect(encodeClaudeProjectPath(`/work/${"x".repeat(220)}`)).toMatch(/^.{200}-[a-z0-9]+$/);
 });
 
 test("large task notifications and errors are rankable with raw flags", () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -89,7 +89,13 @@ function projectDirectories(): string[] {
 }
 
 export function encodeClaudeProjectPath(projectDir: string): string {
-  return projectDir.replace(/[\\/:]/g, "-");
+  const encoded = projectDir.replace(/[^a-zA-Z0-9]/g, "-");
+  if (encoded.length <= 200) return encoded;
+  let hash = 0;
+  for (let index = 0; index < projectDir.length; index++) {
+    hash = ((hash << 5) - hash + projectDir.charCodeAt(index)) | 0;
+  }
+  return `${encoded.slice(0, 200)}-${Math.abs(hash).toString(36)}`;
 }
 
 export function resolveTranscriptMatch(
@@ -102,8 +108,14 @@ export function resolveTranscriptMatch(
     throw new Error(`Transcript for session ${sessionId} was not found under ~/.claude/projects`);
   if (matches.length === 1) return matches[0]!;
   if (projectDir) {
-    const encodedProjectDirectory = join(projectsRoot, encodeClaudeProjectPath(projectDir));
-    const exact = matches.filter((path) => dirname(path) === encodedProjectDirectory);
+    const projectPaths = new Set([projectDir]);
+    try {
+      projectPaths.add(realpathSync(projectDir));
+    } catch {}
+    const encodedProjectDirectories = new Set(
+      [...projectPaths].map((path) => join(projectsRoot, encodeClaudeProjectPath(path))),
+    );
+    const exact = matches.filter((path) => encodedProjectDirectories.has(dirname(path)));
     if (exact.length === 1) return exact[0]!;
   }
   throw new Error(

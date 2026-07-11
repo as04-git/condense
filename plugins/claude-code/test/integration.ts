@@ -1,6 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -12,11 +11,12 @@ import { isRecord, readTranscriptRows, type JsonRecord } from "../src/transcript
 import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
 
 const unique = randomUUID();
-const projectCwd = join(realpathSync(tmpdir()), `condense-integration-${unique}`);
-const projectDir = join(homedir(), ".claude", "projects", encodeClaudeProjectPath(projectCwd));
+const projectCwdPromise = mkdtemp(join(homedir(), `.condense-integration-${unique}-`));
 const dataDirPromise = mkdtemp(join(tmpdir(), "condense-integration-data-"));
 const createdSessions = new Set<string>();
 const adapter = new ClaudeCodeAdapter();
+let projectCwd = "";
+let projectDir = "";
 let tick = Date.now() - 100000;
 const timestamp = () => new Date((tick += 1000)).toISOString();
 
@@ -128,7 +128,7 @@ async function appendGeneration(path: string, keyword: string): Promise<void> {
 afterAll(async () => {
   for (const sessionId of createdSessions) await rm(join(projectDir, `${sessionId}.jsonl`), { force: true });
   await rm(projectDir, { recursive: true, force: true });
-  await rm(projectCwd, { recursive: true, force: true });
+  await rm(await projectCwdPromise, { recursive: true, force: true });
   await rm(await dataDirPromise, { recursive: true, force: true });
   delete process.env["CONDENSE_DATA_HOME"];
   delete process.env["CLAUDE_CODE_SESSION_ID"];
@@ -138,8 +138,9 @@ afterAll(async () => {
 describe("v0.3.2 SDK workflow", () => {
   test("preserves opaque entries and inactive branches while carrying searchable lineage", async () => {
     process.env["CONDENSE_DATA_HOME"] = await dataDirPromise;
+    projectCwd = await projectCwdPromise;
+    projectDir = join(homedir(), ".claude", "projects", encodeClaudeProjectPath(projectCwd));
     await mkdir(projectDir, { recursive: true });
-    await mkdir(projectCwd, { recursive: true });
     const sourceId = randomUUID();
     createdSessions.add(sourceId);
     const sourcePath = join(projectDir, `${sourceId}.jsonl`);
