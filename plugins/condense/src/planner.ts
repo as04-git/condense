@@ -312,6 +312,10 @@ export function applyRetention(args: {
       row.message["content"] = measured.mutation;
     }
   }
+  // The SDK may reorder parallel tool-result rows while preserving their
+  // content and lineage. Mutation identity is ref-based, so seal a canonical
+  // order rather than treating an equivalent SDK serialization as drift.
+  mutations.sort((a, b) => a.ref.localeCompare(b.ref));
   return { rows, droppedRows, objects, mutations, counts, droppedThinkingTurns, keptThinkingTurns };
 }
 

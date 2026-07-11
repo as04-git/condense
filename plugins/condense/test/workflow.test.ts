@@ -88,7 +88,9 @@ class BuildAdapter extends FakeAdapter {
       sessionId,
       transcriptPath,
       storageEntries,
-      messageRows: storageEntries.filter(isTranscriptRow),
+      // Real SDK forks may reorder parallel message rows. Build correctness
+      // must depend on ref identity, not serialization order.
+      messageRows: storageEntries.filter(isTranscriptRow).reverse(),
       oldToNew,
     };
   }
