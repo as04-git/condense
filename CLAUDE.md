@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`condense` is a Claude Code context-paging plugin. It forks the current session through the official Claude Agent SDK, preserves all genuine user/assistant prose, keeps signed thinking byte-identical or drops it whole, and externalizes selected structured payloads to typed Content-IDs.
+`condense` is a host-neutral context-paging project. The current distribution lives in `plugins/claude-code`; it forks the active Claude Code session through the official Claude Agent SDK, preserves all genuine user/assistant prose, keeps signed thinking byte-identical or drops it whole, and externalizes selected structured payloads to typed Content-IDs. A future Codex distribution belongs in `plugins/codex` and should reuse the planner rather than fork it.
 
 It is derived in part from `claude-magic-compact`, but its retention protocol, in-session ranking, SDK fork architecture, lineage search, typed storage, and deterministic marker are independently evolved.
 
@@ -46,6 +46,7 @@ Retention classes are thinking, tools, agent results, skills, and injections. Mo
 - Omission objects contain typed exact JSON values, a hash over the complete canonical envelope, and bounded provenance. Pre-0.3.1 private-alpha stores are intentionally unsupported.
 - Store/manifest files publish before the transcript; a crash may orphan data but may not publish broken placeholders.
 - Lineage manifests collect only IDs in condense-owned structured placeholder locations, never ID-shaped prose.
+- Installed entrypoints go through `src/bootstrap.ts`. It fingerprints runtime source plus `package.json` and `bun.lock`, serializes installation into `${CLAUDE_PLUGIN_DATA}`, installs frozen production dependencies with optional SDK binaries and lifecycle scripts disabled, copies the runtime source beside them, and launches targets with `--no-install`. Never rely on Bun's implicit auto-install.
 
 ## Storage and retrieval
 
@@ -68,10 +69,11 @@ bun install --frozen-lockfile
 bun run check
 bun run typecheck
 bun test
+bun run test:bootstrap
 bun run test:integration
 claude plugin validate .
 ```
 
-Then update `condense@condense-local`, launch a fresh Claude process, resume a disposable condensed session, and verify title/banner, marker, bounded read, literal/regex lineage search, and repeated condensation.
+Then update `condense@condense`, launch a fresh Claude process, resume a disposable condensed session, and verify title/banner, marker, bounded read, literal/regex lineage search, and repeated condensation.
 
-Never commit private real-session fixtures. Commit only minimized synthetic fixtures. Commit author, if requested, is Aryan Shrivastava <48136120+as04-git@users.noreply.github.com>.
+Never commit private real-session fixtures. Commit only minimized synthetic fixtures. Preserve the configured GitHub noreply commit identity; never override it with an injected account or billing email.

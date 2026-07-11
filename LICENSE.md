@@ -3,11 +3,6 @@ BSD 3-Clause License
 Copyright (c) 2026, Kevin Liao @ Aerovato Research
 Copyright (c) 2026, Aryan Shrivastava
 
-This project (`cc-condense`) is a derivative work of `claude-magic-compact`
-(https://github.com/aerovato/magic-compact). Portions are retained from that
-project under the terms below; modifications are Copyright (c) 2026 Aryan
-Shrivastava and are licensed under the same terms.
-
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 

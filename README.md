@@ -1,12 +1,16 @@
 # condense
 
-**Recoverable, model-ranked context condensation for Claude Code.**
+**Lossless, recoverable context condensation for coding agents.**
 
 Condense moves bulky structured payloads out of Claude's active context while preserving the conversation itself. Every genuine user message and every assistant text block before the condensation command stays verbatim. Selected tool inputs, tool outputs, agent results, skill injections, and other injected material become integrity-checked Content-IDs that remain locally searchable and readable. Signed thinking is either kept byte-for-byte or dropped as a whole block.
 
+“Lossless” here describes durable conversational content: prose is verbatim and externalized structured values preserve their exact JSON semantics. Deliberately dropped ephemeral thinking and incidental JSONL whitespace are not reconstructible from the child. The unchanged parent remains the full fallback.
+
 The result is a new Claude Code session that you `/resume` into. The parent session is never modified.
 
-> Condense is alpha software. Version 0.3.1 establishes a clean storage baseline and intentionally does not support the short-lived pre-0.3.1 private formats.
+The repository is organized as a host-neutral Condense project. `plugins/claude-code` is the current distribution; a future Codex adapter can live under `plugins/codex` without changing the planner or public workflow.
+
+> Condense is alpha software. Version 0.3.2 establishes a clean storage baseline and intentionally does not support the short-lived pre-0.3.1 private formats.
 
 ## Why this exists
 
@@ -86,21 +90,39 @@ These preferences intentionally trade a few mechanical calls for a workflow in w
 
 ## Install
 
-Condense requires Bun on `PATH`.
+Condense requires Bun on `PATH` and network access to the npm registry on first use or after a dependency update.
+
+From inside Claude Code:
+
+```text
+/plugin marketplace add as04-git/condense
+/plugin install condense@condense
+/reload-plugins
+```
+
+For local development:
 
 ```bash
 claude plugin marketplace add /path/to/condense
-claude plugin install condense@condense-local
+claude plugin install condense@condense
 ```
 
-Restart Claude Code after installing or updating so the skill and MCP server reload.
+The first invocation installs pinned production dependencies and a sealed copy of the runtime source into Claude's persistent plugin-data directory. Condense explicitly omits the Agent SDK's large optional native binaries because its `forkSession` path does not require them. Later invocations reuse that runtime; updates reinstall only when the bundled source, package manifest, or lockfile changes.
+
+Update or remove the public plugin with:
+
+```text
+/plugin marketplace update condense
+/plugin update condense@condense
+/plugin uninstall condense@condense
+```
 
 ## Use
 
 ```text
-/condense [keepTurns] [--thinking=MODE] [--tools=MODE]
-                        [--agent-results=MODE] [--skills=MODE]
-                        [--injections=MODE]
+/condense:condense [keepTurns] [--thinking=MODE] [--tools=MODE]
+                                 [--agent-results=MODE] [--skills=MODE]
+                                 [--injections=MODE]
 ```
 
 Modes:
@@ -142,10 +164,10 @@ Use the read-only storage report instead:
 
 ```bash
 # Overall store; inside Claude, also reports the current session lineage.
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" storage
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" storage
 
 # Overall store plus one explicit conversation lineage.
-bun "${CLAUDE_PLUGIN_ROOT}/src/condense.ts" storage <session-id>
+bun "${CLAUDE_PLUGIN_ROOT}/src/bootstrap.ts" condense "${CLAUDE_PLUGIN_DATA}" storage <session-id>
 ```
 
 The compact JSON reports exact regular-file bytes for the whole root, objects, manifests, and pending workflow records. A lineage adds referenced/present/missing object counts, the unique object-file bytes referenced by that manifest, and rendered payload characters.
@@ -227,20 +249,21 @@ Kept thinking blocks are never parsed and rewritten: their exact signed block is
 - **The local store grows until the user cleans it.** Measurement is built in; automatic deletion is not. Omitted data is still present on disk and should not be mistaken for secure erasure.
 - **Very large lineages are bounded.** Retrieval caps request scope and response size; unusually large histories may need explicit Content-ID subsets.
 - **Claude compatibility depends on the SDK and host format.** Condense pins its dependencies, preserves unknown entries, and fails closed on drift, but Claude Code changes can still require adapter updates.
-- **The Codex adapter does not exist yet.** The planner and protocol were shaped around a host boundary, but 0.3.1 stabilizes Claude Code only.
+- **The Codex adapter does not exist yet.** The planner and protocol were shaped around a host boundary, but 0.3.2 stabilizes Claude Code only.
 
 ## Development and QA
 
 ```bash
-cd plugins/condense
+cd plugins/claude-code
 bun install --frozen-lockfile
 bun run check
 bun run typecheck
 bun test
+bun run test:bootstrap
 bun run test:integration
 ```
 
-The unit suite uses minimized synthetic fixtures. Integration tests create disposable Claude sessions and exercise the real SDK fork, signature preservation, parent chains, inactive branches, opaque storage entries, titles, repeated condensation, and lineage retrieval.
+The unit suite uses minimized synthetic fixtures. Integration tests create disposable Claude sessions and exercise the real SDK fork, signature preservation, parent chains, inactive branches, opaque storage entries, titles, repeated condensation, and lineage retrieval. CI runs the unit, clean-bootstrap, SDK integration, type, format, and package checks on Linux, macOS, and Windows. The authenticated resume smoke has been exercised on Linux/WSL2.
 
 An authenticated resume check is opt-in and never runs in CI. Point it at a disposable-capable real transcript with at least one eligible payload; the harness copies it to throwaway IDs and removes the fixture, child, and private store afterward:
 
@@ -254,4 +277,14 @@ bun run test:smoke
 
 Condense is independently evolved from parts of [`claude-magic-compact`](https://github.com/aerovato/magic-compact). It retains and substantially adapts transcript, omission-store, and MCP machinery while replacing the spawned summarizer with in-session retention planning and an exact staged build protocol.
 
-Both projects use the BSD 3-Clause license. Both copyright notices are retained in [LICENSE.md](./LICENSE.md).
+Both projects use the BSD 3-Clause license. The standard license text and both copyright notices are in [LICENSE.md](./LICENSE.md); derivative and external-dependency attribution is in [NOTICE.md](./NOTICE.md).
+
+## Security and privacy
+
+Condense is an independent, unofficial project and is not affiliated with or endorsed by Anthropic or OpenAI.
+
+- Condensation and retrieval operate on local Claude Code session files. Condense does not call a second LLM or send omission objects to a separate service.
+- First-use dependency bootstrap contacts the configured npm registry and installs the exact versions pinned by `bun.lock` into `${CLAUDE_PLUGIN_DATA}`. Dependency lifecycle scripts and the Agent SDK's optional native binaries are disabled.
+- Omission objects and workflow records are stored with user-only permissions where the filesystem supports POSIX modes. Their hashes detect tampering; the files are not encrypted and remain readable to processes with access to the same user account.
+- Retrieving an omitted value intentionally sends the selected excerpt back through the active Claude session, subject to Claude Code's normal data handling.
+- The plugin can execute with the user's privileges, as all Claude Code plugins can. Review the source and install only from a repository you trust.
