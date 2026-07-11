@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
 import {
   allocateOmission, collectReferencedContentIds, createEmptyCache, readOmittedContent,
-  saveManifest, saveOmissionCache, searchOmittedContent,
+  makeV3Object, newContentId, omissionNotice, parseOmissionNotice, saveManifest,
+  saveOmissionCache, saveV3Objects, searchOmittedContent,
 } from "../src/omission";
 import { pruneToolInput } from "../src/prune";
 
@@ -71,4 +72,26 @@ test("collects only structurally owned placeholder IDs", () => {
     { type: "user", message: { content: [{ type: "tool_result", content: `[condense: output omitted (2ch) — retrieve: ${id}]` }] } },
   ];
   expect(collectReferencedContentIds(rows)).toEqual([id]);
+});
+
+test("writes directly addressable v3 objects and parses only exact notices", async () => {
+  const id = newContentId();
+  await saveV3Objects([makeV3Object(id, { exact: ["value"] }, { kind: "tool-output", metadata: { command: "x".repeat(1000) } })]);
+  const notice = omissionNotice("Bash output omitted", 10, id);
+  expect(parseOmissionNotice(notice)?.contentId).toBe(id);
+  expect(parseOmissionNotice(`prefix ${notice}`)).toBeNull();
+  const result = await readOmittedContent(id, { config: DEFAULT_CONFIG });
+  expect(result?.text).toContain('"exact"');
+  expect(JSON.stringify(result?.metadata).length).toBeLessThan(2100);
+});
+
+test("bounds full regex matches and reports missing IDs", async () => {
+  const id = newContentId();
+  await saveV3Objects([makeV3Object(id, "x".repeat(100000))]);
+  const result = await searchOmittedContent({ query: "[x]+", mode: "regex", contentIds: [id, newContentId()], maxMatches: 1, config: DEFAULT_CONFIG });
+  expect(String(result.matches[0]!.match).length).toBeLessThanOrEqual(500);
+  expect(result.matches[0]!.matchTruncated).toBe(true);
+  expect(result.complete).toBe(false);
+  expect(result.missingContentIds).toHaveLength(1);
+  expect(JSON.stringify(result).length).toBeLessThan(DEFAULT_CONFIG.retrieval.maxResponseChars);
 });

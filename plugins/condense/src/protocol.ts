@@ -1,26 +1,27 @@
 import { createHash } from "node:crypto";
-import { RETENTION_MODES, type CondenseConfig, type PolicyClass, type RetentionMode } from "./config";
-import { isRecord, type TranscriptRow } from "./transcript";
+import type { PolicyClass, RetentionMode } from "./config";
+import { isRecord } from "./transcript";
 
 export type CandidateAction = "keep" | "drop" | "none";
 export type CandidateManifestItem = {
   ref: string;
   class: PolicyClass;
   action: CandidateAction;
+  defaultKeep: boolean;
   turn: number;
   size: number;
+  netChars: number;
+  kind: string;
+  label: string;
+  notice: string;
+  signals: string;
+  evidence: string;
+  deepEvidence: string;
 };
 
-export type ReceiptPayload = {
-  sessionId: string;
-  cutoffUuid: string;
-  keepTurns: number;
-  policies: Record<PolicyClass, RetentionMode>;
-  sourceDigest: string;
-  candidateDigest: string;
-};
-
-export type BuildDecision = { receipt: string; keep: string[]; drop: string[]; title?: string };
+export type PrepareDecision = { receipt: string; keep: string[]; drop: string[]; title?: string };
+export type InspectRequest = { receipt: string; cursor?: string; refs?: string[] };
+export type BuildRequest = { plan: string };
 
 export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -34,48 +35,14 @@ export function sha256(value: unknown): string {
   return createHash("sha256").update(typeof value === "string" ? value : stableStringify(value)).digest("hex");
 }
 
-export function digestSource(rows: TranscriptRow[], cutoffUuid: string): string {
-  const index = rows.findIndex((row) => row.uuid === cutoffUuid);
-  if (index < 0) throw new Error(`cutoff row ${cutoffUuid} is not present in the active transcript`);
-  return sha256(rows.slice(0, index + 1));
-}
-
-export function digestCandidates(items: CandidateManifestItem[]): string {
-  return sha256([...items].sort((a, b) => a.ref.localeCompare(b.ref)));
-}
-
 export function actionForMode(mode: RetentionMode): CandidateAction {
   if (mode === "keep-ranked") return "keep";
   if (mode === "drop-ranked") return "drop";
   return "none";
 }
 
-export function encodeReceipt(payload: ReceiptPayload): string {
-  return Buffer.from(stableStringify(payload), "utf8").toString("base64url");
-}
-
-export function decodeReceipt(receipt: string): ReceiptPayload {
-  if (!receipt || typeof receipt !== "string") throw new Error("build requires a receipt string from analyze");
-  let value: unknown;
-  try { value = JSON.parse(Buffer.from(receipt, "base64url").toString("utf8")); }
-  catch { throw new Error("invalid analyze receipt"); }
-  if (!isRecord(value) || typeof value["sessionId"] !== "string" || typeof value["cutoffUuid"] !== "string"
-      || typeof value["keepTurns"] !== "number" || !isRecord(value["policies"])
-      || typeof value["sourceDigest"] !== "string" || typeof value["candidateDigest"] !== "string") {
-    throw new Error("invalid analyze receipt shape");
-  }
-  const policies = value["policies"] as Record<string, unknown>;
-  const expectedPolicyKeys: PolicyClass[] = ["thinking", "tools", "agentResults", "skills", "injections"];
-  const policyKeys = Object.keys(policies);
-  if (policyKeys.length !== expectedPolicyKeys.length || expectedPolicyKeys.some((key) => !(key in policies))) throw new Error("invalid analyze receipt policies");
-  for (const key of expectedPolicyKeys) if (!(RETENTION_MODES as readonly unknown[]).includes(policies[key])) throw new Error(`invalid analyze receipt policy ${key}`);
-  if (!Number.isInteger(value["keepTurns"]) || value["keepTurns"] < 0) throw new Error("invalid analyze receipt keepTurns");
-  if (!/^[0-9a-f]{64}$/.test(value["sourceDigest"]) || !/^[0-9a-f]{64}$/.test(value["candidateDigest"])) throw new Error("invalid analyze receipt digest");
-  return value as ReceiptPayload;
-}
-
-export function parseBuildDecision(value: unknown): BuildDecision {
-  if (!isRecord(value)) throw new Error("build decision must be a JSON object");
+export function parsePrepareDecision(value: unknown): PrepareDecision {
+  if (!isRecord(value)) throw new Error("prepare decision must be a JSON object");
   const allowed = new Set(["receipt", "keep", "drop", "title"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`unknown build field "${key}"`);
   const refs = (key: "keep" | "drop"): string[] => {
@@ -94,6 +61,29 @@ export function parseBuildDecision(value: unknown): BuildDecision {
   return { receipt: value["receipt"], keep, drop, title: typeof title === "string" ? title.trim() : undefined };
 }
 
-export function configPolicies(config: CondenseConfig): ReceiptPayload["policies"] {
-  return { ...config.policies };
+/** @deprecated retained for source compatibility; prepare now owns decisions. */
+export const parseBuildDecision = parsePrepareDecision;
+
+export function parseInspectRequest(value: unknown): InspectRequest {
+  if (!isRecord(value)) throw new Error("inspect request must be a JSON object");
+  const allowed = new Set(["receipt", "cursor", "refs"]);
+  for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`unknown inspect field "${key}"`);
+  if (typeof value["receipt"] !== "string") throw new Error("inspect requires an analysis receipt");
+  const cursor = value["cursor"];
+  const refs = value["refs"];
+  if (cursor !== undefined && typeof cursor !== "string") throw new Error("cursor must be a string");
+  if (refs !== undefined && (!Array.isArray(refs) || refs.some((ref) => typeof ref !== "string"))) throw new Error("refs must be an array of strings");
+  if (cursor !== undefined && refs !== undefined) throw new Error("cursor and refs are mutually exclusive");
+  if (cursor === undefined && refs === undefined) throw new Error("inspect requires cursor or refs");
+  if (Array.isArray(refs) && (refs.length === 0 || refs.length > 20)) throw new Error("refs must contain between 1 and 20 refs");
+  return { receipt: value["receipt"], cursor, refs: refs as string[] | undefined };
+}
+
+export function parseBuildRequest(value: unknown): BuildRequest {
+  if (!isRecord(value)) throw new Error("build request must be a JSON object");
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "plan" || typeof value["plan"] !== "string") {
+    throw new Error("build accepts only a prepared plan handle");
+  }
+  return { plan: value["plan"] };
 }

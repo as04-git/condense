@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_CONFIG, applyConfigValue, loadConfig } from "../src/config";
-import { decodeReceipt, encodeReceipt, parseBuildDecision } from "../src/protocol";
+import { parseBuildRequest, parseInspectRequest, parsePrepareDecision } from "../src/protocol";
 
 const created: string[] = [];
 const originalConfigHome = process.env["XDG_CONFIG_HOME"];
@@ -30,13 +30,17 @@ describe("config", () => {
   });
 });
 
-describe("receipt and decision schema", () => {
-  const payload = { sessionId: "s", cutoffUuid: "u", keepTurns: 1, policies: DEFAULT_CONFIG.policies, sourceDigest: "a".repeat(64), candidateDigest: "b".repeat(64) };
-  test("round-trips an opaque receipt", () => expect(decodeReceipt(encodeReceipt(payload))).toEqual(payload));
+describe("workflow request schemas", () => {
   test("rejects malformed decisions", () => {
-    expect(() => parseBuildDecision({ keep: [] })).toThrow("receipt");
-    expect(() => parseBuildDecision({ receipt: "x", keep: ["a", "a"] })).toThrow("duplicate");
-    expect(() => parseBuildDecision({ receipt: "x", keep: ["a"], drop: ["a"] })).toThrow("both");
-    expect(() => parseBuildDecision({ receipt: "x", unexpected: true })).toThrow("unknown build field");
+    expect(() => parsePrepareDecision({ keep: [] })).toThrow("receipt");
+    expect(() => parsePrepareDecision({ receipt: "x", keep: ["a", "a"] })).toThrow("duplicate");
+    expect(() => parsePrepareDecision({ receipt: "x", keep: ["a"], drop: ["a"] })).toThrow("both");
+    expect(() => parsePrepareDecision({ receipt: "x", unexpected: true })).toThrow("unknown build field");
+  });
+  test("requires inspect cursor or refs and build plan only", () => {
+    expect(() => parseInspectRequest({ receipt: "x" })).toThrow("cursor or refs");
+    expect(() => parseInspectRequest({ receipt: "x", cursor: "p_1", refs: ["o:x"] })).toThrow("mutually exclusive");
+    expect(parseBuildRequest({ plan: "bp_x" })).toEqual({ plan: "bp_x" });
+    expect(() => parseBuildRequest({ receipt: "x", keep: [] })).toThrow("prepared plan");
   });
 });

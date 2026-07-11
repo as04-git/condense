@@ -1,6 +1,7 @@
 import { chmod, open, readFile, rename } from "node:fs/promises";
 
 export type JsonRecord = Record<string, unknown>;
+export type RawTranscriptEntry = JsonRecord;
 
 export type TranscriptRow = JsonRecord & {
   type: "user" | "assistant" | "attachment" | "system";
@@ -27,6 +28,10 @@ export async function readActiveTranscriptRows(
   transcriptPath: string,
 ): Promise<TranscriptRow[]> {
   const rows = await readTranscriptRows(transcriptPath);
+  return selectActiveTranscriptRows(rows);
+}
+
+export function selectActiveTranscriptRows(rows: TranscriptRow[]): TranscriptRow[] {
   const lastBoundaryIndex = rows.findLastIndex(isCompactBoundary);
   return buildActiveChain(
     lastBoundaryIndex === -1 ? rows : rows.slice(lastBoundaryIndex + 1),
@@ -287,7 +292,7 @@ function getMessageId(row: TranscriptRow): string | null {
     : null;
 }
 
-function isTranscriptRow(value: unknown): value is TranscriptRow {
+export function isTranscriptRow(value: unknown): value is TranscriptRow {
   return (
     isRecord(value)
     && typeof value["uuid"] === "string"
@@ -298,15 +303,16 @@ function isTranscriptRow(value: unknown): value is TranscriptRow {
   );
 }
 
-async function readTranscriptEntries(
+export async function readTranscriptEntries(
   transcriptPath: string,
-): Promise<unknown[]> {
+): Promise<JsonRecord[]> {
   const content = await readFile(transcriptPath, "utf8");
   const lines = content.split("\n").filter(line => line.trim() !== "");
-  const entries: unknown[] = [];
+  const entries: JsonRecord[] = [];
   lines.forEach((line, i) => {
     try {
-      entries.push(JSON.parse(line) as unknown);
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed)) entries.push(parsed);
     } catch (err) {
       // The current session is live and may be mid-append: tolerate a single
       // unparseable trailing line. Any other parse error is a real corruption.

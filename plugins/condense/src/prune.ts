@@ -11,7 +11,7 @@
 // Tool OUTPUTS are handled entirely in build.ts (applyToolOutputMode); there is
 // no output pruning here and no threshold governs any keep/drop decision.
 
-import { allocateOmission, inputOmissionNotice, noticeOverhead } from "./omission";
+import { allocateOmission, inputOmissionNotice, noticeOverhead, omissionNotice, parseOmissionNotice } from "./omission";
 import { isRecord, type JsonRecord } from "./transcript";
 
 type OmissionCache = Parameters<typeof allocateOmission>[0];
@@ -174,6 +174,26 @@ export function pruneToolInput(
   return size;
 }
 
+export function pruneToolInputWithId(block: JsonRecord, contentId: string): { size: number; value: unknown; kind: "tool-input"; metadata: Record<string, unknown> } | null {
+  const ti = toolInput(block);
+  if (!ti) return null;
+  const spec = INPUT_SPECS[ti.name];
+  if (!spec) return null;
+  const size = specSize(spec, ti.input);
+  if (size < INPUT_FLOOR_CHARS) return null;
+  const description = spec.descriptionFn(ti.input);
+  if (spec.kind === "truncate") {
+    const command = stringifyContent(ti.input[spec.field]);
+    ti.input[spec.field] = `${command.slice(0, spec.keep)}\n[REST OMITTED BY CONDENSE]`;
+    ti.input[`${spec.field}_omission_notice`] = omissionNotice(description, command.length, contentId);
+    return { size, value: command, kind: "tool-input", metadata: { toolName: ti.name, field: spec.field } };
+  }
+  const fields = Object.fromEntries(spec.fields.map((field) => [field, ti.input[field]]));
+  for (const field of spec.fields) ti.input[field] = "[Omitted by condense]";
+  ti.input[`${spec.fields.join("_")}_omission_notice`] = omissionNotice(description, size, contentId);
+  return { size, value: fields, kind: "tool-input", metadata: { toolName: ti.name, fields: [...spec.fields], path: ti.input["file_path"] ?? ti.input["notebook_path"] } };
+}
+
 function stringifyContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (content === undefined || content === null) return "";
@@ -184,7 +204,7 @@ function stringifyContent(content: unknown): string {
 // notice (that would nest notice→notice→original and force multi-hop retrieval);
 // the existing notice already points at the original Content-ID or skill.
 export function isCondenseNotice(text: string): boolean {
-  return text.includes("omitted by condense") || text.includes("[condense:");
+  return parseOmissionNotice(text) !== null;
 }
 
 // True if this tool_use block's input was already pruned by an earlier condense

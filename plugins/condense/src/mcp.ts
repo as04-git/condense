@@ -4,7 +4,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { loadConfig } from "./config";
 import { readOmittedContent, searchOmittedContent } from "./omission";
 
-const server = new Server({ name: "condense", version: "0.2.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "condense", version: "0.3.0" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [
   {
@@ -53,6 +53,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!result) throw new Error(`No omitted content found for Content-ID ${args["contentId"]}`);
   } else if (request.params.name === "search_omitted_content") {
     if (typeof args["query"] !== "string") throw new Error("search_omitted_content requires query");
+    if (args["mode"] !== undefined && args["mode"] !== "literal" && args["mode"] !== "regex") throw new Error("mode must be literal or regex");
     result = await searchOmittedContent({
       query: args["query"],
       mode: args["mode"] === "regex" ? "regex" : "literal",

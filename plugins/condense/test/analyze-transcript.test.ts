@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { runAnalyze } from "../src/analyze";
 import { DEFAULT_CONFIG } from "../src/config";
 import { buildAssistantTurns, findCondenseOperationBoundary, validateCondenseSuffix, type TranscriptRow } from "../src/transcript";
-import { assertForkLineage } from "../src/fork";
+import { assertForkLineage } from "../src/claude-adapter";
 
 const row = (value: Partial<TranscriptRow> & Pick<TranscriptRow, "type" | "uuid" | "parentUuid" | "message">): TranscriptRow => ({ sessionId: "00000000-0000-0000-0000-000000000001", timestamp: new Date(Number(value.uuid.replace(/\D/g, "") || 1) * 1000).toISOString(), ...value } as TranscriptRow);
 
@@ -44,8 +44,8 @@ test("large task notifications and errors are rankable with raw flags", () => {
   const result = runAnalyze(rows, 0);
   const agent = result.rankableAttachments.find((item) => item.ref === "o:agent1")!;
   const failed = result.rankableAttachments.find((item) => item.ref === "o:bash1")!;
-  expect(agent.kind).toBe("agent-result"); expect(agent.action).toBe("drop"); expect(agent.tier).toBe("likely-keep");
-  expect(failed.errored).toBe(true); expect(failed.failureLines?.length).toBeGreaterThan(0);
+  expect(agent.kind).toBe("agent-result"); expect(agent.action).toBe("drop"); expect(agent.priority).toBeGreaterThan(0);
+  expect(failed.signals).toContain("error"); expect(failed.evidence).toContain("fatal");
 });
 
 test("Bash repeats are not newer-target signals while file reads are", () => {
@@ -61,5 +61,15 @@ test("Bash repeats are not newer-target signals while file reads are", () => {
   const result = runAnalyze(rows, { ...DEFAULT_CONFIG, keepTurns: 0, policies: { ...DEFAULT_CONFIG.policies }, retrieval: { ...DEFAULT_CONFIG.retrieval } });
   expect(result.rankableAttachments.find((item) => item.ref === "o:b1")!.newerOnSameTarget).toBe(false);
   expect(result.rankableAttachments.find((item) => item.ref === "o:f1")!.newerOnSameTarget).toBe(true);
-  expect(result.summary.protectedProseChars).toBeGreaterThan(0); expect(result.summary.minimumPostCondenseChars).toBeLessThan(result.summary.totalChars);
+  expect(result.rankableAttachments.every((item) => item.netChars > 0)).toBe(true);
+});
+
+test("thinking accounting includes reasoning text as well as its signature", () => {
+  const rows = [
+    row({ type: "user", uuid: "u1", parentUuid: null, message: { content: "reason" } }),
+    row({ type: "assistant", uuid: "a1", parentUuid: "u1", message: { content: [{ type: "thinking", thinking: "x".repeat(10000), signature: "sig" }, { type: "text", text: "done" }] } }),
+  ];
+  const result = runAnalyze(rows, 0);
+  expect(result.rankableThinking[0]!.size).toBeGreaterThan(10000);
+  expect(result.rankableThinking[0]!.netChars).toBeGreaterThan(10000);
 });

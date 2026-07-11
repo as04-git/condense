@@ -11,6 +11,9 @@ export type PolicyClass = "thinking" | "tools" | "agentResults" | "skills" | "in
 export type CondenseConfig = {
   keepTurns: number;
   policies: Record<PolicyClass, RetentionMode>;
+  analysis: {
+    maxPageChars: number;
+  };
   retrieval: {
     defaultReadChars: number;
     maxReadChars: number;
@@ -23,6 +26,7 @@ export type CondenseConfig = {
     maxExcerptChars: number;
     allowRegex: boolean;
     maxRegexPatternChars: number;
+    maxResponseChars: number;
   };
 };
 
@@ -40,6 +44,9 @@ export const DEFAULT_CONFIG: CondenseConfig = {
     skills: "drop-all",
     injections: "keep-ranked",
   },
+  analysis: {
+    maxPageChars: 12000,
+  },
   retrieval: {
     defaultReadChars: 8000,
     maxReadChars: 50000,
@@ -52,12 +59,14 @@ export const DEFAULT_CONFIG: CondenseConfig = {
     maxExcerptChars: 4000,
     allowRegex: true,
     maxRegexPatternChars: 500,
+    maxResponseChars: 50000,
   },
 };
 
 const POLICY_KEYS = new Set<PolicyClass>(["thinking", "tools", "agentResults", "skills", "injections"]);
 const RETRIEVAL_KEYS = new Set(Object.keys(DEFAULT_CONFIG.retrieval));
-const ROOT_KEYS = new Set(["keepTurns", "policies", "retrieval"]);
+const ANALYSIS_KEYS = new Set(Object.keys(DEFAULT_CONFIG.analysis));
+const ROOT_KEYS = new Set(["keepTurns", "policies", "analysis", "retrieval"]);
 
 function configHome(): string {
   return process.env["XDG_CONFIG_HOME"] || join(homedir(), ".config");
@@ -109,6 +118,7 @@ export function applyConfigValue(base: CondenseConfig, raw: unknown, path: strin
   const next: CondenseConfig = {
     keepTurns: base.keepTurns,
     policies: { ...base.policies },
+    analysis: { ...base.analysis },
     retrieval: { ...base.retrieval },
   };
   if (raw["keepTurns"] !== undefined) next.keepTurns = integer(raw["keepTurns"], `${path}.keepTurns`, 0, 10000);
@@ -119,6 +129,13 @@ export function applyConfigValue(base: CondenseConfig, raw: unknown, path: strin
       next.policies[key as PolicyClass] = mode(value, `${path}.policies.${key}`);
     }
   }
+  if (raw["analysis"] !== undefined) {
+    if (!isRecord(raw["analysis"])) throw new Error(`${path}.analysis: expected an object`);
+    assertKeys(raw["analysis"], ANALYSIS_KEYS, `${path}.analysis`);
+    if (raw["analysis"]["maxPageChars"] !== undefined) {
+      next.analysis.maxPageChars = integer(raw["analysis"]["maxPageChars"], `${path}.analysis.maxPageChars`, 4000, 50000);
+    }
+  }
   if (raw["retrieval"] !== undefined) {
     if (!isRecord(raw["retrieval"])) throw new Error(`${path}.retrieval: expected an object`);
     assertKeys(raw["retrieval"], RETRIEVAL_KEYS, `${path}.retrieval`);
@@ -127,6 +144,7 @@ export function applyConfigValue(base: CondenseConfig, raw: unknown, path: strin
       defaultReadChars: [1, 200000], maxReadChars: [1, 200000], minQueryChars: [1, 100],
       defaultContextLines: [0, 50], maxContextLines: [0, 50], defaultMatches: [1, 200],
       maxMatches: [1, 200], maxExcerptChars: [1, 50000], maxRegexPatternChars: [1, 2000],
+      maxResponseChars: [1000, 200000],
     };
     for (const [key, value] of Object.entries(r)) {
       if (key === "caseSensitive" || key === "allowRegex") {
