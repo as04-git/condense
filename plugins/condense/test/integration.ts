@@ -169,7 +169,17 @@ describe("v0.3 SDK workflow", () => {
     const sourceId = randomUUID();
     createdSessions.add(sourceId);
     const sourcePath = join(projectDir, `${sourceId}.jsonl`);
-    const firstUser = messageRow(sourceId, "user", null, "synthetic first prompt");
+    const preBoundary = messageRow(sourceId, "user", null, "pre-boundary history");
+    const compactBoundary = messageRow(
+      sourceId,
+      "system",
+      preBoundary["uuid"] as string,
+      [{ type: "text", text: "synthetic compact boundary" }],
+      { condense: { boundary: true } },
+    );
+    const firstUser = messageRow(sourceId, "user", compactBoundary["uuid"] as string, "synthetic first prompt", {
+      futureMetadata: { sentinel: "unknown-metadata-preserved" },
+    });
     const firstUse = messageRow(sourceId, "assistant", firstUser["uuid"] as string, [
       { type: "tool_use", id: "toolu_generation1", name: "Bash", input: { command: "emit generation-one-keyword" } },
       { type: "tool_use", id: "toolu_legacy_v1", name: "Bash", input: { command: "legacy v1" } },
@@ -208,6 +218,8 @@ describe("v0.3 SDK workflow", () => {
     };
     const relocated = { type: "relocated", sessionId: sourceId, relocatedCwd: projectCwd };
     await writeRows(sourcePath, [
+      preBoundary,
+      compactBoundary,
       firstUser,
       firstUse,
       firstResult,
@@ -226,9 +238,16 @@ describe("v0.3 SDK workflow", () => {
       firstRaw.some((row) => row["type"] === "content-replacement" && JSON.stringify(row).includes("preserved")),
     ).toBe(true);
     expect(firstRaw.some((row) => row["type"] === "relocated")).toBe(true);
+    expect(firstRaw.some((row) => isRecord(row["condense"]) && row["condense"]["boundary"] === true)).toBe(true);
+    expect(JSON.stringify(firstRaw)).toContain("unknown-metadata-preserved");
     expect(JSON.stringify(firstRaw)).toContain("INACTIVE-");
+    expect(first.sourceChars).toBeLessThan(12000);
     const firstRows = await readTranscriptRows(first.transcriptPath);
-    expect(JSON.stringify(firstRows)).toContain("synthetic-signed-thinking");
+    const sourceThinking = (signed["message"] as JsonRecord)["content"] as JsonRecord[];
+    const builtThinking = firstRows
+      .flatMap((row) => (isRecord(row.message) && Array.isArray(row.message["content"]) ? row.message["content"] : []))
+      .find((block) => isRecord(block) && block["type"] === "thinking");
+    expect(builtThinking).toEqual(sourceThinking[0]);
     expect(JSON.stringify(firstRows)).toContain("synthetic durable prose");
     expect(firstRows.at(-1)?.["condenseMarker"]).toBe(true);
     for (const row of firstRows)

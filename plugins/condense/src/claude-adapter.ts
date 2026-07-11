@@ -29,6 +29,25 @@ function projectDirectories(): string[] {
   }
 }
 
+export function resolveTranscriptMatch(
+  sessionId: string,
+  matches: string[],
+  projectDir: string | undefined,
+  projectsRoot = join(homedir(), ".claude", "projects"),
+): string {
+  if (matches.length === 0)
+    throw new Error(`Transcript for session ${sessionId} was not found under ~/.claude/projects`);
+  if (matches.length === 1) return matches[0]!;
+  if (projectDir) {
+    const encodedProjectDirectory = join(projectsRoot, projectDir.replace(/[\\/]/g, "-"));
+    const exact = matches.filter((path) => dirname(path) === encodedProjectDirectory);
+    if (exact.length === 1) return exact[0]!;
+  }
+  throw new Error(
+    `Ambiguous session ${sessionId}: ${matches.length} transcripts exist; remove copied duplicates before condensing.`,
+  );
+}
+
 function projectCwdFor(rows: TranscriptRow[], cutoffUuid: string): string {
   const cutoff = rows.find((row) => row.uuid === cutoffUuid);
   return typeof cutoff?.["cwd"] === "string" ? cutoff["cwd"] : process.cwd();
@@ -123,25 +142,13 @@ export class ClaudeCodeAdapter implements HostAdapter {
     const matches = projectDirectories()
       .map((directory) => join(directory, `${sessionId}.jsonl`))
       .filter(existsSync);
-    if (matches.length === 0)
-      throw new Error(`Transcript for session ${sessionId} was not found under ~/.claude/projects`);
-    if (matches.length > 1) {
-      const projectDir = process.env["CLAUDE_PROJECT_DIR"];
-      if (projectDir) {
-        const encodedProjectDirectory = join(homedir(), ".claude", "projects", projectDir.replace(/[\\/]/g, "-"));
-        const exact = matches.filter((path) => dirname(path) === encodedProjectDirectory);
-        if (exact.length === 1)
-          return { host: this.host, sessionId, transcriptPath: exact[0]!, projectCwd: projectDir };
-      }
-      throw new Error(
-        `Ambiguous session ${sessionId}: ${matches.length} transcripts exist; remove copied duplicates before condensing.`,
-      );
-    }
+    const projectDir = process.env["CLAUDE_PROJECT_DIR"];
+    const transcriptPath = resolveTranscriptMatch(sessionId, matches, projectDir);
     return {
       host: this.host,
       sessionId,
-      transcriptPath: matches[0]!,
-      projectCwd: process.env["CLAUDE_PROJECT_DIR"] || process.cwd(),
+      transcriptPath,
+      projectCwd: projectDir || process.cwd(),
     };
   }
 

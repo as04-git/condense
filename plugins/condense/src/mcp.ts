@@ -2,6 +2,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config";
+import { boundedMcpTextResponse, configForMcpResponse } from "./mcp-response";
 import { readOmittedContent, searchOmittedContent } from "./omission";
 
 const server = new Server({ name: "condense", version: "0.3.0" }, { capabilities: { tools: {} } });
@@ -53,15 +54,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const cwd = process.env["CLAUDE_PROJECT_DIR"] || process.cwd();
   const config = await loadConfig(cwd);
   const responseLimit = config.retrieval.maxResponseChars;
-  const boundedConfig = {
-    ...config,
-    retrieval: {
-      ...config.retrieval,
-      // The JSON text is escaped once more by the MCP envelope. Half the
-      // configured budget is a deterministic upper bound for that expansion.
-      maxResponseChars: Math.max(256, Math.floor((responseLimit - 256) / 2)),
-    },
-  };
+  const boundedConfig = configForMcpResponse(config);
   let result: unknown;
   if (request.params.name === "read_omitted_content") {
     if (typeof args["contentId"] !== "string") throw new Error("read_omitted_content requires contentId");
@@ -86,10 +79,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       sessionId: process.env["CLAUDE_CODE_SESSION_ID"],
     });
   } else throw new Error(`Tool ${request.params.name} not found`);
-  const response = { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
-  if (JSON.stringify(response).length > responseLimit)
-    throw new Error("Bounded retrieval result exceeded retrieval.maxResponseChars after MCP serialization");
-  return response;
+  return boundedMcpTextResponse(result, responseLimit);
 });
 
 await server.connect(new StdioServerTransport());

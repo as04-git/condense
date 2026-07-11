@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
+import { boundedMcpTextResponse, configForMcpResponse } from "../src/mcp-response";
 import {
   allocateOmission,
   collectReferencedContentIds,
@@ -187,4 +188,15 @@ test("bounds full regex matches and reports missing IDs", async () => {
   expect(result.complete).toBe(false);
   expect(result.missingContentIds).toHaveLength(1);
   expect(JSON.stringify(result).length).toBeLessThan(DEFAULT_CONFIG.retrieval.maxResponseChars);
+
+  const mcpConfig = configForMcpResponse(DEFAULT_CONFIG);
+  const manyMatches = await searchOmittedContent({
+    query: "x{1000}",
+    mode: "regex",
+    contentIds: [id],
+    maxMatches: 50,
+    config: mcpConfig,
+  });
+  const response = boundedMcpTextResponse(manyMatches, DEFAULT_CONFIG.retrieval.maxResponseChars);
+  expect(JSON.stringify(response).length).toBeLessThanOrEqual(DEFAULT_CONFIG.retrieval.maxResponseChars);
 });

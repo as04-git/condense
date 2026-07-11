@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG, type RetentionMode } from "../src/config";
@@ -188,6 +188,8 @@ test("analyze and inspect paginate within the configured budget", async () => {
   }
   const stored = await loadAnalysisRecord(first.receipt);
   expect(seen.size).toBe(stored.candidates.filter((candidate) => candidate.action !== "none").length);
+  expect((await stat(join(root, "data", "pending"))).mode & 0o777).toBe(0o700);
+  expect((await stat(join(root, "data", "pending", `${first.receipt}.json`))).mode & 0o777).toBe(0o600);
   const detail = await inspectAnalysis(adapter, { receipt: first.receipt, refs: [String(first.reviewToKeep[0]![0])] });
   expect(JSON.stringify(detail).length).toBeLessThanOrEqual(4000);
 });
@@ -222,6 +224,12 @@ test("prepare is repeatable and pending records reject drift, expiry, and unsupp
     inspectAnalysis(adapter, { receipt: analysis.receipt, refs: [String(analysis.reviewToKeep[0]![0])] }),
   ).rejects.toThrow("Active context changed");
   snapshot.contextDigest = sha256(snapshot.contextEntries);
+
+  snapshot.storageDigest = sha256("storage drift");
+  await expect(
+    inspectAnalysis(adapter, { receipt: analysis.receipt, refs: [String(analysis.reviewToKeep[0]![0])] }),
+  ).rejects.toThrow("SDK fork-source prefix changed");
+  snapshot.storageDigest = sha256(snapshot.storageEntries);
 
   const pending = join(root, "data", "pending", `${first.plan}.json`);
   const expired = JSON.parse(await readFile(pending, "utf8"));

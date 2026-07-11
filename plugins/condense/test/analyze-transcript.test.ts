@@ -7,7 +7,7 @@ import {
   validateCondenseSuffix,
   type TranscriptRow,
 } from "../src/transcript";
-import { assertForkLineage } from "../src/claude-adapter";
+import { assertForkLineage, resolveTranscriptMatch } from "../src/claude-adapter";
 
 const row = (
   value: Partial<TranscriptRow> & Pick<TranscriptRow, "type" | "uuid" | "parentUuid" | "message">,
@@ -71,6 +71,15 @@ test("fails closed when the SDK omits fork lineage metadata", () => {
   expect(() =>
     assertForkLineage([row({ type: "user", uuid: "u", parentUuid: null, message: { content: "x" } })]),
   ).toThrow("forkedFrom.messageUuid");
+});
+
+test("duplicate session IDs resolve only through the exact active project directory", () => {
+  const root = "/home/test/.claude/projects";
+  const session = "same-id";
+  const matches = [`${root}/-work-one/${session}.jsonl`, `${root}/-work-two/${session}.jsonl`];
+  expect(resolveTranscriptMatch(session, matches, "/work/two", root)).toBe(matches[1]!);
+  expect(() => resolveTranscriptMatch(session, matches, undefined, root)).toThrow("Ambiguous session");
+  expect(() => resolveTranscriptMatch(session, matches, "/work/missing", root)).toThrow("Ambiguous session");
 });
 
 test("large task notifications and errors are rankable with raw flags", () => {
