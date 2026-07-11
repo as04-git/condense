@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureRuntime } from "../src/bootstrap";
+import { testTmpdir } from "./temp";
 
 const created: string[] = [];
 
@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 async function temporary(prefix: string): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), prefix));
+  const path = await mkdtemp(join(testTmpdir(), prefix));
   created.push(path);
   return path;
 }

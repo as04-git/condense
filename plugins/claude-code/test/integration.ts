@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { ClaudeCodeAdapter, encodeClaudeProjectPath } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
@@ -9,10 +9,11 @@ import { DEFAULT_CONFIG } from "../src/config";
 import { loadManifest, searchOmittedContent } from "../src/omission";
 import { isRecord, readTranscriptRows, type JsonRecord } from "../src/transcript";
 import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
+import { testTmpdir } from "./temp";
 
 const unique = randomUUID();
 const projectCwdPromise = mkdtemp(join(homedir(), `.condense-integration-${unique}-`));
-const dataDirPromise = mkdtemp(join(tmpdir(), "condense-integration-data-"));
+const dataDirPromise = mkdtemp(join(testTmpdir(), "condense-integration-data-"));
 const createdSessions = new Set<string>();
 const adapter = new ClaudeCodeAdapter();
 let projectCwd = "";

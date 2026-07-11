@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG } from "../src/config";
 import { boundedMcpTextResponse, configForMcpResponse } from "../src/mcp-response";
@@ -17,10 +16,11 @@ import {
   searchOmittedContent,
 } from "../src/omission";
 import { pruneToolInputWithId } from "../src/prune";
+import { testTmpdir } from "./temp";
 
 let root = "";
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "condense-store-"));
+  root = await mkdtemp(join(testTmpdir(), "condense-store-"));
   process.env["CONDENSE_DATA_HOME"] = join(root, "data");
 });
 afterEach(async () => {

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_CONFIG, applyConfigValue, loadConfig } from "../src/config";
 import { parseBuildRequest, parseInspectRequest, parsePrepareDecision } from "../src/protocol";
+import { testTmpdir } from "./temp";
 
 const created: string[] = [];
 const originalConfigHome = process.env["XDG_CONFIG_HOME"];
@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 async function temp(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), "condense-config-"));
+  const path = await mkdtemp(join(testTmpdir(), "condense-config-"));
   created.push(path);
   return path;
 }

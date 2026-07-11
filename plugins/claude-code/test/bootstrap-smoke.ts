@@ -1,11 +1,11 @@
 import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { testTmpdir } from "./temp";
 
 const pluginRoot = dirname(import.meta.dir);
-const fixtureRoot = await mkdtemp(join(tmpdir(), "condense-clean-plugin-"));
-const dataRoot = await mkdtemp(join(tmpdir(), "condense-clean-data-"));
-const storeRoot = await mkdtemp(join(tmpdir(), "condense-clean-store-"));
+const fixtureRoot = await mkdtemp(join(testTmpdir(), "condense-clean-plugin-"));
+const dataRoot = await mkdtemp(join(testTmpdir(), "condense-clean-data-"));
+const storeRoot = await mkdtemp(join(testTmpdir(), "condense-clean-store-"));
 
 try {
   await Promise.all([

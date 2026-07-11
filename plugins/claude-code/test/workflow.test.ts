@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG, type RetentionMode } from "../src/config";
@@ -10,6 +10,7 @@ import { sha256 } from "../src/protocol";
 import { loadAnalysisRecord, loadPreparedRecord, withPlanLock } from "../src/state";
 import { analyzeCurrentSession, inspectAnalysis, prepareBuild } from "../src/workflow";
 import { isTranscriptRow, writeTranscriptEntries, type JsonRecord, type TranscriptRow } from "../src/transcript";
+import { testTmpdir } from "./temp";
 
 let root = "";
 let snapshot: SessionSnapshot;
@@ -118,7 +119,7 @@ function row(type: "user" | "assistant", parentUuid: string | null, content: unk
 }
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "condense-workflow-"));
+  root = await mkdtemp(join(testTmpdir(), "condense-workflow-"));
   process.env["CONDENSE_DATA_HOME"] = join(root, "data");
   process.env["CLAUDE_CODE_SESSION_ID"] = "00000000-0000-0000-0000-000000000001";
   const firstUser = row("user", null, "old work");
@@ -254,14 +255,19 @@ test("plan locks are exclusive, recover abandoned owners, and successful builds 
   const analysis = await analyzeCurrentSession(adapter, DEFAULT_CONFIG);
   const prepared = await prepareBuild(adapter, { receipt: analysis.receipt, keep: [] });
   let release!: () => void;
+  let acquired!: () => void;
+  const lockAcquired = new Promise<void>((resolve) => {
+    acquired = resolve;
+  });
   const held = withPlanLock(
     prepared.plan,
     () =>
       new Promise<void>((resolve) => {
         release = resolve;
+        acquired();
       }),
   );
-  await Bun.sleep(5);
+  await lockAcquired;
   await expect(withPlanLock(prepared.plan, async () => undefined)).rejects.toThrow("already being built");
   release();
   await held;
