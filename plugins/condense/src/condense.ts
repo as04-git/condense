@@ -1,6 +1,7 @@
 import { ClaudeCodeAdapter } from "./claude-adapter";
 import { loadConfig, RETENTION_MODES, type ConfigOverrides, type PolicyClass, type RetentionMode } from "./config";
 import { runBuild } from "./build";
+import { omissionStorageUsage } from "./omission";
 import { analyzeCurrentSession, inspectAnalysis, prepareBuild } from "./workflow";
 
 async function readStdin(): Promise<string> {
@@ -78,7 +79,14 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(await runBuild(adapter, await jsonArgument(rest, command))));
     return;
   }
-  console.error("usage: bun condense.ts <analyze [options] | inspect <json> | prepare <json> | build <json>>");
+  if (command === "storage") {
+    if (rest.length > 1) throw new Error("storage accepts at most one session ID");
+    console.log(JSON.stringify(await omissionStorageUsage(rest[0] || process.env["CLAUDE_CODE_SESSION_ID"])));
+    return;
+  }
+  console.error(
+    "usage: bun condense.ts <analyze [options] | inspect <json> | prepare <json> | build <json> | storage [session-id]>",
+  );
   process.exit(2);
 }
 

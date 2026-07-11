@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, link, mkdir, open, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { RE2JS } from "re2js";
@@ -152,6 +152,80 @@ export function makeOmissionObject(
 
 function objectPath(id: string): string {
   return join(objectsDir(), id.slice(3, 5), `${id}.json`);
+}
+
+type FileUsage = { files: number; bytes: number };
+
+async function regularFileUsage(path: string): Promise<FileUsage> {
+  let entries;
+  try {
+    entries = await readdir(path, { withFileTypes: true });
+  } catch (error) {
+    if (isRecord(error) && error["code"] === "ENOENT") return { files: 0, bytes: 0 };
+    throw error;
+  }
+  const usage: FileUsage = { files: 0, bytes: 0 };
+  for (const entry of entries) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await regularFileUsage(child);
+      usage.files += nested.files;
+      usage.bytes += nested.bytes;
+    } else if (entry.isFile()) {
+      usage.files++;
+      usage.bytes += (await stat(child)).size;
+    }
+  }
+  return usage;
+}
+
+export async function omissionStorageUsage(sessionId?: string) {
+  const root = dataRoot();
+  const [total, objects, manifests, pending] = await Promise.all([
+    regularFileUsage(root),
+    regularFileUsage(objectsDir()),
+    regularFileUsage(manifestsDir()),
+    regularFileUsage(join(root, "pending")),
+  ]);
+  let lineage:
+    | {
+        sessionId: string;
+        manifestFound: boolean;
+        referencedObjects: number;
+        presentObjects: number;
+        missingObjects: number;
+        objectBytes: number;
+        payloadChars: number;
+      }
+    | undefined;
+  if (sessionId) {
+    const manifest = await loadManifest(sessionId);
+    lineage = {
+      sessionId,
+      manifestFound: manifest !== null,
+      referencedObjects: manifest?.contentIds.length ?? 0,
+      presentObjects: 0,
+      missingObjects: 0,
+      objectBytes: 0,
+      payloadChars: 0,
+    };
+    for (const id of manifest?.contentIds ?? []) {
+      const file = Bun.file(objectPath(id));
+      if (!(await file.exists())) {
+        lineage.missingObjects++;
+        continue;
+      }
+      const object = await resolveEntry(id);
+      if (!object) {
+        lineage.missingObjects++;
+        continue;
+      }
+      lineage.presentObjects++;
+      lineage.objectBytes += file.size;
+      lineage.payloadChars += object.entry.renderedLength;
+    }
+  }
+  return { root, total, objects, manifests, pending, ...(lineage ? { lineage } : {}) };
 }
 
 export async function saveOmissionObjects(objects: OmissionObject[]): Promise<void> {

@@ -7,6 +7,7 @@ import {
   collectReferencedContentIds,
   makeOmissionObject,
   newContentId,
+  omissionStorageUsage,
   omissionNotice,
   parseOmissionNotice,
   readOmittedContent,
@@ -125,6 +126,33 @@ test("writes directly addressable objects and parses only exact notices", async 
   const result = await readOmittedContent(id, { config: DEFAULT_CONFIG });
   expect(result?.text).toContain('"exact"');
   expect(JSON.stringify(result?.metadata).length).toBeLessThan(2100);
+});
+
+test("reports exact store bytes and attributable lineage usage without deleting data", async () => {
+  const included = newContentId();
+  const unrelated = newContentId();
+  const missing = newContentId();
+  const includedValue = "lineage payload".repeat(100);
+  await saveOmissionObjects([
+    makeOmissionObject(included, includedValue),
+    makeOmissionObject(unrelated, "other payload"),
+  ]);
+  await saveManifest("active", [included, missing]);
+
+  const usage = await omissionStorageUsage("active");
+  expect(usage.objects.files).toBe(2);
+  expect(usage.objects.bytes).toBeGreaterThan(includedValue.length);
+  expect(usage.manifests.files).toBe(1);
+  expect(usage.lineage).toMatchObject({
+    sessionId: "active",
+    manifestFound: true,
+    referencedObjects: 2,
+    presentObjects: 1,
+    missingObjects: 1,
+    payloadChars: includedValue.length,
+  });
+  expect(usage.lineage!.objectBytes).toBeLessThan(usage.objects.bytes);
+  expect(usage.total.files).toBe(3);
 });
 
 test("detects full-envelope tampering and refuses object collisions", async () => {
