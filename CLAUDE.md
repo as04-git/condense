@@ -46,7 +46,7 @@ Retention classes are thinking, tools, agent results, skills, and injections. Mo
 - Omission objects contain typed exact JSON values, a hash over the complete canonical envelope, and bounded provenance. Pre-0.3.1 private-alpha stores are intentionally unsupported.
 - Store/manifest files publish before the transcript; a crash may orphan data but may not publish broken placeholders.
 - Lineage manifests collect only IDs in condense-owned structured placeholder locations, never ID-shaped prose.
-- Installed entrypoints go through `src/bootstrap.ts`. It fingerprints runtime source plus `package.json` and `bun.lock`, serializes installation into `${CLAUDE_PLUGIN_DATA}`, installs frozen production dependencies with optional SDK binaries and lifecycle scripts disabled, copies the runtime source beside them, and launches targets with `--no-install`. Never rely on Bun's implicit auto-install.
+- Installed entrypoints go through `src/bootstrap.ts`. It fingerprints runtime source plus `runtime/package.json` and `runtime/bun.lock`, serializes installation into `${CLAUDE_PLUGIN_DATA}`, installs frozen production dependencies with optional SDK binaries and lifecycle scripts disabled, copies the runtime source beside them, and launches targets with `--no-install`. Keep development manifests at repository root; never add a plugin-root `package.json` or rely on Bun's implicit auto-install.
 
 ## Storage and retrieval
 

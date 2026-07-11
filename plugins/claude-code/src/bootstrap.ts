@@ -22,8 +22,8 @@ function errorCode(error: unknown): string {
 async function fingerprint(pluginRoot: string): Promise<string> {
   const hash = createHash("sha256");
   hash.update(`bootstrap=${BOOTSTRAP_VERSION}\nplatform=${process.platform}\narch=${process.arch}\n`);
-  hash.update(await readFile(join(pluginRoot, "package.json")));
-  hash.update(await readFile(join(pluginRoot, "bun.lock")));
+  hash.update(await readFile(join(pluginRoot, "runtime", "package.json")));
+  hash.update(await readFile(join(pluginRoot, "runtime", "bun.lock")));
   const sourceRoot = join(pluginRoot, "src");
   for (const name of (await readdir(sourceRoot)).filter((value) => value.endsWith(".ts")).sort()) {
     hash.update(`\n${name}\n`);
@@ -130,8 +130,8 @@ export async function ensureRuntime(options: {
   try {
     await mkdir(stagingDirectory, { recursive: false, mode: 0o700 });
     await Promise.all([
-      copyFile(join(options.pluginRoot, "package.json"), join(stagingDirectory, "package.json")),
-      copyFile(join(options.pluginRoot, "bun.lock"), join(stagingDirectory, "bun.lock")),
+      copyFile(join(options.pluginRoot, "runtime", "package.json"), join(stagingDirectory, "package.json")),
+      copyFile(join(options.pluginRoot, "runtime", "bun.lock"), join(stagingDirectory, "bun.lock")),
     ]);
     await (options.installer ?? defaultInstaller)(stagingDirectory);
     await cp(join(options.pluginRoot, "src"), join(stagingDirectory, "src"), { recursive: true });

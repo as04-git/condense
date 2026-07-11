@@ -10,8 +10,7 @@ const storeRoot = await mkdtemp(join(tmpdir(), "condense-clean-store-"));
 try {
   await Promise.all([
     cp(join(pluginRoot, "src"), join(fixtureRoot, "src"), { recursive: true }),
-    cp(join(pluginRoot, "package.json"), join(fixtureRoot, "package.json")),
-    cp(join(pluginRoot, "bun.lock"), join(fixtureRoot, "bun.lock")),
+    cp(join(pluginRoot, "runtime"), join(fixtureRoot, "runtime"), { recursive: true }),
   ]);
   const command = [
     process.execPath,

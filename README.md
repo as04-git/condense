@@ -107,7 +107,7 @@ claude plugin marketplace add /path/to/condense
 claude plugin install condense@condense
 ```
 
-The first invocation installs pinned production dependencies and a sealed copy of the runtime source into Claude's persistent plugin-data directory. Condense explicitly omits the Agent SDK's large optional native binaries because its `forkSession` path does not require them. Later invocations reuse that runtime; updates reinstall only when the bundled source, package manifest, or lockfile changes.
+The first invocation installs pinned production dependencies and a sealed copy of the runtime source into Claude's persistent plugin-data directory. Condense explicitly omits the Agent SDK's large optional native binaries because its `forkSession` path does not require them. The distributed plugin has no root `package.json`, so Claude and Bun cannot implicitly install the development tree into the versioned plugin cache. Later invocations reuse the explicit runtime; updates reinstall only when its bundled source, manifest, or lockfile changes.
 
 Update or remove the public plugin with:
 
@@ -254,7 +254,6 @@ Kept thinking blocks are never parsed and rewritten: their exact signed block is
 ## Development and QA
 
 ```bash
-cd plugins/claude-code
 bun install --frozen-lockfile
 bun run check
 bun run typecheck

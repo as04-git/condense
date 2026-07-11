@@ -19,8 +19,9 @@ async function temporary(prefix: string): Promise<string> {
 test("runtime bootstrap serializes installation and refreshes only when its inputs change", async () => {
   const pluginRoot = await temporary("condense-bootstrap-plugin-");
   const dataRoot = await temporary("condense-bootstrap-data-");
-  await writeFile(join(pluginRoot, "package.json"), JSON.stringify({ name: "fixture", dependencies: {} }));
-  await writeFile(join(pluginRoot, "bun.lock"), "fixture-lock-v1");
+  await mkdir(join(pluginRoot, "runtime"));
+  await writeFile(join(pluginRoot, "runtime", "package.json"), JSON.stringify({ name: "fixture", dependencies: {} }));
+  await writeFile(join(pluginRoot, "runtime", "bun.lock"), "fixture-lock-v1");
   await mkdir(join(pluginRoot, "src"));
   await writeFile(join(pluginRoot, "src", "fixture.ts"), "export const fixture = 1;\n");
   let installs = 0;
@@ -45,7 +46,7 @@ test("runtime bootstrap serializes installation and refreshes only when its inpu
   await ensureRuntime({ pluginRoot, dataRoot, installer });
   expect(installs).toBe(1);
 
-  await writeFile(join(pluginRoot, "bun.lock"), "fixture-lock-v2");
+  await writeFile(join(pluginRoot, "runtime", "bun.lock"), "fixture-lock-v2");
   await ensureRuntime({ pluginRoot, dataRoot, installer });
   expect(installs).toBe(2);
 
