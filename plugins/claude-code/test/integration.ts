@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { ClaudeCodeAdapter } from "../src/claude-adapter";
+import { ClaudeCodeAdapter, encodeClaudeProjectPath } from "../src/claude-adapter";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG } from "../src/config";
 import { loadManifest, searchOmittedContent } from "../src/omission";
@@ -13,7 +13,7 @@ import { analyzeCurrentSession, prepareBuild } from "../src/workflow";
 
 const unique = randomUUID();
 const projectCwd = join(realpathSync(tmpdir()), `condense-integration-${unique}`);
-const projectDir = join(homedir(), ".claude", "projects", projectCwd.replace(/[\\/]/g, "-"));
+const projectDir = join(homedir(), ".claude", "projects", encodeClaudeProjectPath(projectCwd));
 const dataDirPromise = mkdtemp(join(tmpdir(), "condense-integration-data-"));
 const createdSessions = new Set<string>();
 const adapter = new ClaudeCodeAdapter();

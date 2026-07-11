@@ -88,6 +88,10 @@ function projectDirectories(): string[] {
   }
 }
 
+export function encodeClaudeProjectPath(projectDir: string): string {
+  return projectDir.replace(/[\\/:]/g, "-");
+}
+
 export function resolveTranscriptMatch(
   sessionId: string,
   matches: string[],
@@ -98,7 +102,7 @@ export function resolveTranscriptMatch(
     throw new Error(`Transcript for session ${sessionId} was not found under ~/.claude/projects`);
   if (matches.length === 1) return matches[0]!;
   if (projectDir) {
-    const encodedProjectDirectory = join(projectsRoot, projectDir.replace(/[\\/]/g, "-"));
+    const encodedProjectDirectory = join(projectsRoot, encodeClaudeProjectPath(projectDir));
     const exact = matches.filter((path) => dirname(path) === encodedProjectDirectory);
     if (exact.length === 1) return exact[0]!;
   }

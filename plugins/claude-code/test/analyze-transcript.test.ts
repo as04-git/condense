@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG } from "../src/config";
 import { buildAssistantTurns, type TranscriptRow } from "../src/transcript";
 import {
   assertForkLineage,
+  encodeClaudeProjectPath,
   findClaudeCondenseOperationBoundary,
   resolveTranscriptMatch,
   validateClaudeCondenseSuffix,
@@ -103,6 +104,10 @@ test("duplicate session IDs resolve only through the exact active project direct
   expect(() => resolveTranscriptMatch(session, matches, join(sep, "work", "missing"), root)).toThrow(
     "Ambiguous session",
   );
+});
+
+test("Claude project path encoding handles Windows drive paths", () => {
+  expect(encodeClaudeProjectPath("C:\\Users\\aryan\\project")).toBe("C--Users-aryan-project");
 });
 
 test("large task notifications and errors are rankable with raw flags", () => {
