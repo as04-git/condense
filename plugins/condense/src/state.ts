@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readdir, readFile, rm, stat, unlink } from "node:fs/promises";
-import { homedir } from "node:os";
+import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import type { Attachment, AnalyzeInternal } from "./analyze";
 import type { CondenseConfig } from "./config";
@@ -12,6 +12,14 @@ import { isRecord, type JsonRecord } from "./transcript";
 
 const RECORD_VERSION = 1;
 const TTL_MS = 24 * 60 * 60 * 1000;
+
+type LockRecord = {
+  version: 1;
+  pid: number;
+  hostname: string;
+  token: string;
+  createdAt: string;
+};
 
 export type StoredSource = {
   identity: SessionIdentity;
@@ -204,20 +212,101 @@ export async function removePending(handle: string): Promise<void> {
   await unlink(recordPath(handle)).catch(() => undefined);
 }
 
+function parseLockRecord(value: unknown): LockRecord | null {
+  if (
+    !isRecord(value) ||
+    value["version"] !== 1 ||
+    !Number.isInteger(value["pid"]) ||
+    Number(value["pid"]) < 1 ||
+    typeof value["hostname"] !== "string" ||
+    typeof value["token"] !== "string" ||
+    typeof value["createdAt"] !== "string"
+  ) {
+    return null;
+  }
+  return value as LockRecord;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isRecord(error) && error["code"] === "EPERM";
+  }
+}
+
+async function reclaimAbandonedLock(path: string): Promise<boolean> {
+  let lock: LockRecord | null = null;
+  let age = 0;
+  try {
+    lock = parseLockRecord(JSON.parse(await readFile(path, "utf8")));
+    age = Date.now() - (await stat(path)).mtimeMs;
+  } catch (error) {
+    if (isRecord(error) && error["code"] === "ENOENT") return true;
+    try {
+      age = Date.now() - (await stat(path)).mtimeMs;
+    } catch {
+      return true;
+    }
+  }
+  const abandoned = lock?.hostname === hostname() ? !processIsAlive(lock.pid) : age > TTL_MS;
+  if (!abandoned) return false;
+  const quarantine = `${path}.stale-${randomBytes(8).toString("base64url")}`;
+  try {
+    await rename(path, quarantine);
+    await unlink(quarantine).catch(() => undefined);
+    return true;
+  } catch (error) {
+    return isRecord(error) && error["code"] === "ENOENT";
+  }
+}
+
+async function acquireRecordLock(path: string, conflictMessage: string): Promise<LockRecord> {
+  const record: LockRecord = {
+    version: 1,
+    pid: process.pid,
+    hostname: hostname(),
+    token: randomBytes(16).toString("base64url"),
+    createdAt: new Date().toISOString(),
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let lock;
+    try {
+      lock = await open(path, "wx", 0o600);
+      await lock.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+      await lock.sync();
+      await lock.close();
+      return record;
+    } catch (error) {
+      await lock?.close().catch(() => undefined);
+      if (!isRecord(error) || error["code"] !== "EEXIST") {
+        await unlink(path).catch(() => undefined);
+        throw error;
+      }
+      if (attempt > 0 || !(await reclaimAbandonedLock(path))) throw new Error(conflictMessage);
+    }
+  }
+  throw new Error(conflictMessage);
+}
+
+async function releaseRecordLock(path: string, token: string): Promise<void> {
+  try {
+    const current = parseLockRecord(JSON.parse(await readFile(path, "utf8")));
+    if (current?.token === token) await unlink(path);
+  } catch {
+    // The lock is already gone or was replaced. Never remove an unknown owner.
+  }
+}
+
 async function withRecordLock<T>(handle: string, conflictMessage: string, action: () => Promise<T>): Promise<T> {
   const path = `${recordPath(handle)}.lock`;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  let lock;
-  try {
-    lock = await open(path, "wx", 0o600);
-  } catch {
-    throw new Error(conflictMessage);
-  }
+  const lock = await acquireRecordLock(path, conflictMessage);
   try {
     return await action();
   } finally {
-    await lock.close();
-    await unlink(path).catch(() => undefined);
+    await releaseRecordLock(path, lock.token);
   }
 }
 

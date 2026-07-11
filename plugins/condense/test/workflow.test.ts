@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG, type RetentionMode } from "../src/config";
@@ -246,7 +247,7 @@ test("prepare is repeatable and pending records reject drift, expiry, and unsupp
   await expect(loadAnalysisRecord(analysis.receipt)).rejects.toThrow("rerun analyze");
 });
 
-test("plan locking is exclusive and successful build consumes both handles", async () => {
+test("plan locks are exclusive, recover abandoned owners, and successful builds consume both handles", async () => {
   const adapter = new BuildAdapter();
   const analysis = await analyzeCurrentSession(adapter, DEFAULT_CONFIG);
   const prepared = await prepareBuild(adapter, { receipt: analysis.receipt, keep: [] });
@@ -262,6 +263,24 @@ test("plan locking is exclusive and successful build consumes both handles", asy
   await expect(withPlanLock(prepared.plan, async () => undefined)).rejects.toThrow("already being built");
   release();
   await held;
+
+  const lockPath = join(root, "data", "pending", `${prepared.plan}.json.lock`);
+  await writeFile(
+    lockPath,
+    JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      hostname: hostname(),
+      token: "abandoned",
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  let recovered = false;
+  await withPlanLock(prepared.plan, async () => {
+    recovered = true;
+  });
+  expect(recovered).toBe(true);
+  expect(await Bun.file(lockPath).exists()).toBe(false);
 
   const result = await runBuild(adapter, { plan: prepared.plan });
   expect(result.finalChars).toBe(prepared.impactChars.projected);
