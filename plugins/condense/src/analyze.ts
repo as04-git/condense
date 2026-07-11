@@ -1,7 +1,7 @@
 import { DEFAULT_CONFIG, type CondenseConfig, type PolicyClass } from "./config";
-import { omissionNotice } from "./omission";
+import { injectionMutation, mutateToolInputWithMeasure, thinkingDropMeasure, toolOutputMutation } from "./planner";
 import { actionForMode, type CandidateManifestItem } from "./protocol";
-import { bigInputSize, injectedInfo, isCondenseNotice, pruneToolInputWithId } from "./prune";
+import { bigInputSize, injectedInfo, isCondenseNotice } from "./prune";
 import {
   buildAssistantTurns,
   isRecord,
@@ -141,10 +141,6 @@ function labelFor(name: string, input: JsonRecord | undefined, suffix: string): 
   return `${suffix} ${name}`;
 }
 
-function blockDelta(before: JsonRecord, after: JsonRecord): number {
-  return Math.max(0, JSON.stringify(before).length - JSON.stringify(after).length);
-}
-
 function rankable(turn: number, turnCount: number, keepTurns: number): boolean {
   return turn < turnCount - keepTurns;
 }
@@ -226,7 +222,7 @@ export function runAnalyze(
           if (!isRecord(block)) return;
           if (block["type"] === "thinking" && rankable(turnIndex, count, config.keepTurns)) {
             const action = actionForMode(config.policies.thinking);
-            const size = JSON.stringify(block).length;
+            const size = thinkingDropMeasure(block).netChars;
             const ref = `t:${row.uuid}#${blockIndex}`;
             thinking.push({
               ref,
@@ -252,13 +248,14 @@ export function runAnalyze(
             const size = bigInputSize(block);
             if (!size || typeof block["id"] !== "string") return;
             const clone = structuredClone(block) as JsonRecord;
-            if (!pruneToolInputWithId(clone, PLACEHOLDER_ID)) return;
+            const mutation = mutateToolInputWithMeasure(clone, PLACEHOLDER_ID);
+            if (!mutation) return;
             const name = String(block["name"] ?? "?");
             const input = isRecord(block["input"]) ? block["input"] : undefined;
             const action = actionForMode(config.policies.tools);
             const raw = stringify(input);
             const ref = `i:${block["id"]}`;
-            const netChars = blockDelta(block, clone);
+            const netChars = mutation.netChars;
             if (netChars <= 0) return;
             attachments.push({
               ref,
@@ -303,8 +300,7 @@ export function runAnalyze(
           const candidateClass: AttachmentClass = agent ? "agentResults" : "tools";
           const action = actionForMode(config.policies[candidateClass]);
           const description = outputDescription(name, raw, input, agent);
-          const replacement = omissionNotice(description, raw.length, PLACEHOLDER_ID);
-          const netChars = Math.max(0, JSON.stringify(block["content"]).length - JSON.stringify(replacement).length);
+          const netChars = toolOutputMutation(block["content"], description, PLACEHOLDER_ID).netChars;
           if (netChars <= 0) continue;
           const later = newer.get(id);
           const reconstructible = ["Read", "Edit", "Write", "NotebookEdit"].includes(name);
@@ -352,8 +348,7 @@ export function runAnalyze(
         const description = injection.skill
           ? `skill ${injection.skill} omitted; re-invoke /${injection.skill}`
           : "injected content omitted";
-        const replacement = [{ type: "text", text: omissionNotice(description, injection.size, PLACEHOLDER_ID) }];
-        const netChars = Math.max(0, JSON.stringify(content).length - JSON.stringify(replacement).length);
+        const netChars = injectionMutation(content, description, injection.size, PLACEHOLDER_ID).netChars;
         if (netChars <= 0) continue;
         attachments.push({
           ref: `s:${row.uuid}`,

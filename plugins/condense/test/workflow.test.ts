@@ -4,11 +4,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runBuild } from "../src/build";
 import { DEFAULT_CONFIG, type RetentionMode } from "../src/config";
-import type { ForkedSession, HostAdapter, SessionIdentity, SessionSnapshot } from "../src/host";
+import type { ForkedSession, HostAdapter, SessionIdentity, SessionPresentation, SessionSnapshot } from "../src/host";
 import { sha256 } from "../src/protocol";
 import { loadAnalysisRecord, loadPreparedRecord, withPlanLock } from "../src/state";
 import { analyzeCurrentSession, inspectAnalysis, prepareBuild } from "../src/workflow";
-import { isTranscriptRow, type JsonRecord, type TranscriptRow } from "../src/transcript";
+import { isTranscriptRow, writeTranscriptEntries, type JsonRecord, type TranscriptRow } from "../src/transcript";
 
 let root = "";
 let snapshot: SessionSnapshot;
@@ -22,11 +22,43 @@ class FakeAdapter implements HostAdapter {
   async snapshot(): Promise<SessionSnapshot> {
     return structuredClone(snapshot);
   }
+  async preparePresentation(_snapshot: SessionSnapshot, titleOverride?: string): Promise<SessionPresentation> {
+    return { generation: 1, title: `🗜 condense #1 — ${titleOverride || "test"}` };
+  }
   async fork(_source: SessionSnapshot, _title: string): Promise<ForkedSession> {
     forkCalls++;
     throw new Error("prepare must not fork");
   }
   async cleanupFork(_fork: ForkedSession): Promise<void> {}
+  async publish(_fork: ForkedSession, _storageEntries: JsonRecord[]): Promise<void> {
+    throw new Error("prepare must not publish");
+  }
+  titleEntries(fork: ForkedSession, presentation: SessionPresentation): JsonRecord[] {
+    return [
+      {
+        type: "custom-title",
+        customTitle: presentation.title,
+        condenseGeneration: presentation.generation,
+        sessionId: fork.sessionId,
+      },
+      { type: "agent-name", agentName: presentation.title, sessionId: fork.sessionId },
+    ];
+  }
+  markerEntry(fork: ForkedSession, parentUuid: string, text: string): TranscriptRow {
+    const latest = Math.max(...fork.messageRows.map((entry) => Date.parse(entry.timestamp) || 0));
+    return {
+      type: "user",
+      uuid: randomUUID(),
+      parentUuid,
+      sessionId: fork.sessionId,
+      condenseMarker: true,
+      timestamp: new Date(latest + 1000).toISOString(),
+      message: { role: "user", content: text },
+    } as TranscriptRow;
+  }
+  resumeCommand(sessionId: string): string {
+    return `/resume ${sessionId}`;
+  }
 }
 
 class BuildAdapter extends FakeAdapter {
@@ -64,6 +96,10 @@ class BuildAdapter extends FakeAdapter {
   override async cleanupFork(fork: ForkedSession): Promise<void> {
     this.cleaned.push(fork.transcriptPath);
     await rm(fork.transcriptPath, { force: true });
+  }
+
+  override async publish(fork: ForkedSession, storageEntries: JsonRecord[]): Promise<void> {
+    await writeTranscriptEntries(fork.transcriptPath, storageEntries);
   }
 }
 
@@ -270,7 +306,7 @@ test("every failed publication stage cleans the SDK fork and retains the prepare
         {
           saveObjects: stage === "objects" ? fail : async () => undefined,
           saveLineageManifest: stage === "manifest" ? fail : async () => undefined,
-          publishTranscript: stage === "transcript" ? fail : async () => undefined,
+          publishSession: stage === "transcript" ? fail : async () => undefined,
         },
       ),
     ).rejects.toThrow(`${stage} publication failed`);

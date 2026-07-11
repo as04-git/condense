@@ -36,6 +36,11 @@ export type ForkedSession = {
   oldToNew: Map<string, string>;
 };
 
+export type SessionPresentation = {
+  generation: number;
+  title: string;
+};
+
 export type TokenCounter = {
   project(snapshot: SessionSnapshot, plan: PreparedRetentionPlan): Promise<TokenProjection>;
 };
@@ -45,7 +50,12 @@ export type HostAdapter = {
   readonly tokenCounter?: TokenCounter;
   locateCurrentSession(): SessionIdentity;
   snapshot(identity: SessionIdentity, expectedCutoffUuid?: string): Promise<SessionSnapshot>;
+  preparePresentation(snapshot: SessionSnapshot, titleOverride?: string): Promise<SessionPresentation>;
   fork(snapshot: SessionSnapshot, title: string): Promise<ForkedSession>;
+  titleEntries(fork: ForkedSession, presentation: SessionPresentation): JsonRecord[];
+  markerEntry(fork: ForkedSession, parentUuid: string, text: string): TranscriptRow;
+  resumeCommand(sessionId: string): string;
+  publish(fork: ForkedSession, storageEntries: JsonRecord[]): Promise<void>;
   cleanupFork(fork: Pick<ForkedSession, "transcriptPath">): Promise<void>;
 };
 

@@ -14,9 +14,23 @@ export type AppliedRetention = {
   rows: TranscriptRow[];
   droppedRows: Set<string>;
   objects: V3OmissionObject[];
+  mutations: PlannedMutation[];
   counts: RetentionCounts;
   droppedThinkingTurns: Set<number>;
   keptThinkingTurns: Set<number>;
+};
+
+export type PlannedMutation = {
+  ref: string;
+  class: CandidateManifestItem["class"];
+  turn: number;
+  policyAction: CandidateManifestItem["action"];
+  kind: string;
+  outcome: "inline" | "externalized" | "dropped-thinking";
+  originalChars: number;
+  replacementChars: number;
+  netChars: number;
+  contentId?: string;
 };
 
 export type Projection = AppliedRetention & {
@@ -24,6 +38,13 @@ export type Projection = AppliedRetention & {
   projectedChars: number;
   markerText: string;
   lineageIds: string[];
+};
+
+export type MutationMeasure<T> = {
+  mutation: T;
+  originalChars: number;
+  replacementChars: number;
+  netChars: number;
 };
 
 function emptyCounts(): RetentionCounts {
@@ -80,6 +101,43 @@ function stringifyContent(value: unknown): string {
   return JSON.stringify(value);
 }
 
+export function thinkingDropMeasure(block: JsonRecord): MutationMeasure<null> {
+  const originalChars = JSON.stringify(block).length;
+  return { mutation: null, originalChars, replacementChars: 0, netChars: originalChars };
+}
+
+export function mutateToolInputWithMeasure(block: JsonRecord, contentId: string) {
+  const originalChars = JSON.stringify(block).length;
+  const omitted = pruneToolInputWithId(block, contentId);
+  if (!omitted) return null;
+  const replacementChars = JSON.stringify(block).length;
+  return {
+    mutation: omitted,
+    originalChars,
+    replacementChars,
+    netChars: originalChars - replacementChars,
+  };
+}
+
+export function toolOutputMutation(value: unknown, description: string, contentId: string): MutationMeasure<string> {
+  const mutation = omissionNotice(description, stringifyContent(value).length, contentId);
+  const originalChars = JSON.stringify(value).length;
+  const replacementChars = JSON.stringify(mutation).length;
+  return { mutation, originalChars, replacementChars, netChars: originalChars - replacementChars };
+}
+
+export function injectionMutation(
+  content: unknown,
+  description: string,
+  renderedLength: number,
+  contentId: string,
+): MutationMeasure<JsonRecord[]> {
+  const mutation = [{ type: "text", text: omissionNotice(description, renderedLength, contentId) }];
+  const originalChars = JSON.stringify(content).length;
+  const replacementChars = JSON.stringify(mutation).length;
+  return { mutation, originalChars, replacementChars, netChars: originalChars - replacementChars };
+}
+
 function toolMaps(rows: TranscriptRow[]): { names: Map<string, string>; inputs: Map<string, JsonRecord> } {
   const names = new Map<string, string>();
   const inputs = new Map<string, JsonRecord>();
@@ -122,10 +180,31 @@ export function applyRetention(args: {
   const candidates = new Map(args.candidates.map((candidate) => [candidate.ref, candidate]));
   const counts = emptyCounts();
   const objects: V3OmissionObject[] = [];
+  const mutations: PlannedMutation[] = [];
   const droppedRows = new Set<string>();
   const droppedThinkingTurns = new Set<number>();
   const keptThinkingTurns = new Set<number>();
   const maps = toolMaps(rows);
+  const recordMutation = (
+    candidate: CandidateManifestItem,
+    keep: boolean,
+    measured: Pick<MutationMeasure<unknown>, "originalChars" | "replacementChars" | "netChars">,
+    contentId?: string,
+  ) => {
+    const outcome = keep ? "inline" : candidate.class === "thinking" ? "dropped-thinking" : "externalized";
+    mutations.push({
+      ref: candidate.ref,
+      class: candidate.class,
+      turn: candidate.turn,
+      policyAction: candidate.action,
+      kind: candidate.kind,
+      outcome,
+      originalChars: measured.originalChars,
+      replacementChars: keep ? measured.originalChars : measured.replacementChars,
+      netChars: keep ? 0 : measured.netChars,
+      ...(contentId ? { contentId } : {}),
+    });
+  };
 
   for (const row of rows) {
     const originalUuid = args.originalUuid(row);
@@ -142,6 +221,7 @@ export function applyRetention(args: {
         const candidate = candidates.get(`t:${originalUuid}#${blockIndex}`);
         if (!candidate) return true;
         const keep = shouldKeepCandidate(candidate, args.decision);
+        recordMutation(candidate, keep, thinkingDropMeasure(block));
         if (keep) {
           counts.thinkingKept++;
           keptThinkingTurns.add(candidate.turn);
@@ -158,12 +238,22 @@ export function applyRetention(args: {
         if (!candidate) continue;
         const keep = shouldKeepCandidate(candidate, args.decision);
         countBucket(counts, candidate, keep);
-        if (keep) continue;
+        if (keep) {
+          const originalChars = JSON.stringify(block).length;
+          recordMutation(candidate, true, { originalChars, replacementChars: originalChars, netChars: 0 });
+          continue;
+        }
         const contentId = args.omissionIds[candidate.ref];
         if (!contentId) throw new Error(`Prepared plan is missing an omission ID for ${candidate.ref}`);
-        const omitted = pruneToolInputWithId(block, contentId);
-        if (!omitted) throw new Error(`Prepared tool-input mutation no longer applies to ${candidate.ref}`);
-        objects.push(makeV3Object(contentId, omitted.value, { kind: omitted.kind, metadata: omitted.metadata }));
+        const measured = mutateToolInputWithMeasure(block, contentId);
+        if (!measured) throw new Error(`Prepared tool-input mutation no longer applies to ${candidate.ref}`);
+        recordMutation(candidate, false, measured, contentId);
+        objects.push(
+          makeV3Object(contentId, measured.mutation.value, {
+            kind: measured.mutation.kind,
+            metadata: measured.mutation.metadata,
+          }),
+        );
       }
       if (Array.isArray(row.message["content"]) && row.message["content"].length === 0) droppedRows.add(row.uuid);
     } else if (isToolResultRow(row)) {
@@ -173,10 +263,16 @@ export function applyRetention(args: {
         if (!candidate) continue;
         const keep = shouldKeepCandidate(candidate, args.decision);
         countBucket(counts, candidate, keep);
-        if (keep) continue;
+        if (keep) {
+          const originalChars = JSON.stringify(block["content"]).length;
+          recordMutation(candidate, true, { originalChars, replacementChars: originalChars, netChars: 0 });
+          continue;
+        }
         const contentId = args.omissionIds[candidate.ref];
         if (!contentId) throw new Error(`Prepared plan is missing an omission ID for ${candidate.ref}`);
         const value = block["content"];
+        const measured = toolOutputMutation(value, candidate.notice, contentId);
+        recordMutation(candidate, false, measured, contentId);
         const input = maps.inputs.get(block["tool_use_id"]);
         objects.push(
           makeV3Object(contentId, value, {
@@ -190,27 +286,33 @@ export function applyRetention(args: {
             },
           }),
         );
-        block["content"] = omissionNotice(candidate.notice, stringifyContent(value).length, contentId);
+        block["content"] = measured.mutation;
       }
     } else if (row.type === "user") {
       const candidate = candidates.get(`s:${originalUuid}`);
       if (!candidate) continue;
       const keep = shouldKeepCandidate(candidate, args.decision);
       countBucket(counts, candidate, keep);
-      if (keep) continue;
+      if (keep) {
+        const originalChars = JSON.stringify(row.message["content"]).length;
+        recordMutation(candidate, true, { originalChars, replacementChars: originalChars, netChars: 0 });
+        continue;
+      }
       const contentId = args.omissionIds[candidate.ref];
       if (!contentId) throw new Error(`Prepared plan is missing an omission ID for ${candidate.ref}`);
       const value = row.message["content"];
+      const measured = injectionMutation(value, candidate.notice, candidate.size, contentId);
+      recordMutation(candidate, false, measured, contentId);
       objects.push(
         makeV3Object(contentId, value, {
           kind: candidate.kind === "skill" ? "skill" : "injected",
           metadata: { rowUuid: originalUuid, label: candidate.label },
         }),
       );
-      row.message["content"] = [{ type: "text", text: omissionNotice(candidate.notice, candidate.size, contentId) }];
+      row.message["content"] = measured.mutation;
     }
   }
-  return { rows, droppedRows, objects, counts, droppedThinkingTurns, keptThinkingTurns };
+  return { rows, droppedRows, objects, mutations, counts, droppedThinkingTurns, keptThinkingTurns };
 }
 
 function promptAnchor(turn: number, prompts: Map<number, string>): [number, string] {

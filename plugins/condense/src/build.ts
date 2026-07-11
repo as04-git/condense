@@ -1,14 +1,12 @@
-import { randomUUID } from "node:crypto";
 import type { HostAdapter } from "./host";
 import { collectReferencedContentIds, saveManifest, saveV3Objects } from "./omission";
 import { applyRetention, contextChars, contextContentDigest, convergeMarker } from "./planner";
-import { parseBuildRequest } from "./protocol";
+import { parseBuildRequest, sha256 } from "./protocol";
 import { loadAnalysisRecord, loadPreparedRecord, removePending, withPlanLock, withReceiptLock } from "./state";
 import {
   isRecord,
   isTranscriptRow,
   selectActiveTranscriptRows,
-  writeTranscriptEntries,
   type JsonRecord,
   type TranscriptRow,
 } from "./transcript";
@@ -17,13 +15,17 @@ import { revalidatePreparedSource } from "./workflow";
 export type BuildPublication = {
   saveObjects: typeof saveV3Objects;
   saveLineageManifest: typeof saveManifest;
-  publishTranscript: typeof writeTranscriptEntries;
+  publishSession(
+    adapter: HostAdapter,
+    fork: Parameters<HostAdapter["publish"]>[0],
+    storageEntries: JsonRecord[],
+  ): Promise<void>;
 };
 
 const DEFAULT_PUBLICATION: BuildPublication = {
   saveObjects: saveV3Objects,
   saveLineageManifest: saveManifest,
-  publishTranscript: writeTranscriptEntries,
+  publishSession: (adapter, fork, storageEntries) => adapter.publish(fork, storageEntries),
 };
 
 function originalUuid(row: TranscriptRow): string {
@@ -45,35 +47,6 @@ function resolveDroppedParents(rows: TranscriptRow[], dropped: Set<string>): voi
     return uuid;
   };
   for (const row of rows) if (row.parentUuid && dropped.has(row.parentUuid)) row.parentUuid = resolve(row.parentUuid);
-}
-
-function titleRows(sessionId: string, title: string, generation: number): JsonRecord[] {
-  return [
-    { type: "custom-title", customTitle: title, sessionId, condenseGeneration: generation },
-    { type: "agent-name", agentName: title, sessionId },
-  ];
-}
-
-function markerRow(templateRows: TranscriptRow[], sessionId: string, parentUuid: string, text: string): TranscriptRow {
-  const template = templateRows.find((row) => row.type === "user" || row.type === "assistant");
-  if (!template) throw new Error("Could not construct the closing marker");
-  const fields: JsonRecord = { ...template };
-  for (const key of ["message", "uuid", "parentUuid", "type", "condenseMarker", "requestId", "isMeta", "forkedFrom"])
-    delete fields[key];
-  const maxMs = templateRows.reduce((max, row) => {
-    const parsed = Date.parse(row.timestamp);
-    return Number.isFinite(parsed) ? Math.max(max, parsed) : max;
-  }, 0);
-  return {
-    ...fields,
-    type: "user",
-    uuid: randomUUID(),
-    parentUuid,
-    sessionId,
-    condenseMarker: true,
-    timestamp: new Date((maxMs || Date.now()) + 1000).toISOString(),
-    message: { role: "user", content: text },
-  } as TranscriptRow;
 }
 
 export async function runBuild(
@@ -98,6 +71,8 @@ export async function runBuild(
           activeOriginalUuids,
           originalUuid,
         });
+        if (sha256(applied.mutations) !== sha256(prepared.plannedMutations))
+          throw new Error("Prepared plan mutation mismatch: candidate mutations differ from the exact dry run");
         for (const row of applied.rows) if (row["condenseMarker"] === true) applied.droppedRows.add(row.uuid);
         resolveDroppedParents(applied.rows, applied.droppedRows);
         const mutated = new Map(applied.rows.map((row) => [row.uuid, row]));
@@ -109,7 +84,7 @@ export async function runBuild(
             finalEntries.push(mutated.get(entry.uuid) ?? entry);
           } else finalEntries.push(entry);
         }
-        finalEntries.push(...titleRows(fork.sessionId, prepared.title, prepared.generation));
+        finalEntries.push(...adapter.titleEntries(fork, { title: prepared.title, generation: prepared.generation }));
 
         const mappedCutoff = fork.oldToNew.get(snapshot.cutoffUuid);
         if (!mappedCutoff) throw new Error("SDK fork did not map the prepared cutoff UUID");
@@ -134,7 +109,7 @@ export async function runBuild(
           prompts,
         });
         const markerText = markerProjection.text;
-        const marker = markerRow(applied.rows, fork.sessionId, markerParent, markerText);
+        const marker = adapter.markerEntry(fork, markerParent, markerText);
         finalEntries.push(marker);
         const activeFinal = selectActiveTranscriptRows(finalEntries.filter(isTranscriptRow));
         const finalChars = contextChars(activeFinal);
@@ -151,7 +126,7 @@ export async function runBuild(
 
         await publication.saveObjects(applied.objects);
         await publication.saveLineageManifest(fork.sessionId, lineageIds);
-        await publication.publishTranscript(fork.transcriptPath, finalEntries);
+        await publication.publishSession(adapter, fork, finalEntries);
         await removePending(prepared.handle);
         await removePending(prepared.analysisHandle);
         return {
@@ -165,7 +140,7 @@ export async function runBuild(
           thinking: prepared.stats.thinking,
           externalized: prepared.stats.externalized,
           inline: prepared.stats.inline,
-          resume: `/resume ${fork.sessionId}`,
+          resume: adapter.resumeCommand(fork.sessionId),
         };
       } catch (error) {
         await adapter.cleanupFork(fork);

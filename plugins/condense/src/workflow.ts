@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { runAnalyze, renderAnalysisPage, renderRefInspection } from "./analyze";
 import type { CondenseConfig } from "./config";
 import type { HostAdapter, SessionSnapshot } from "./host";
@@ -14,7 +13,6 @@ import {
   type PreparedStats,
   type StoredSource,
 } from "./state";
-import { isRecord, type JsonRecord } from "./transcript";
 
 function storedSource(snapshot: SessionSnapshot): StoredSource {
   return {
@@ -84,64 +82,11 @@ export async function inspectAnalysis(adapter: HostAdapter, requestValue: unknow
   return renderRefInspection(record, request.refs!);
 }
 
-async function rawTitleRows(path: string): Promise<JsonRecord[]> {
-  return (await readFile(path, "utf8")).split("\n").flatMap((line) => {
-    try {
-      const row: unknown = JSON.parse(line);
-      return isRecord(row) && ["custom-title", "agent-name"].includes(String(row["type"])) ? [row] : [];
-    } catch {
-      return [];
-    }
-  });
-}
-
-function parentGeneration(rows: JsonRecord[]): number {
-  return rows.reduce((max, row) => {
-    if (row["type"] !== "custom-title") return max;
-    if (typeof row["condenseGeneration"] === "number") return Math.max(max, row["condenseGeneration"]);
-    const match = typeof row["customTitle"] === "string" ? row["customTitle"].match(/^🗜 condense #(\d+) —/u) : null;
-    return match?.[1] ? Math.max(max, Number(match[1])) : max;
-  }, 0);
-}
-
-function firstPrompt(snapshot: SessionSnapshot): string {
-  for (const row of snapshot.contextEntries) {
-    if (row.type !== "user" || row["isMeta"] === true || row["condenseMarker"] === true || !isRecord(row.message))
-      continue;
-    const content = row.message["content"];
-    if (typeof content === "string" && content.trim()) return content.trim();
-    if (Array.isArray(content)) {
-      const text = content
-        .filter((block) => isRecord(block) && block["type"] === "text")
-        .map((block) => String((block as JsonRecord)["text"] ?? ""))
-        .join(" ")
-        .trim();
-      if (text) return text;
-    }
-  }
-  return "session";
-}
-
-function condensedTitle(rows: JsonRecord[], snapshot: SessionSnapshot, generation: number, override?: string): string {
-  let base = override ?? "";
-  if (!base) {
-    const parent = [...rows]
-      .reverse()
-      .find((row) => row["type"] === "custom-title" && typeof row["customTitle"] === "string")?.["customTitle"];
-    const match = typeof parent === "string" ? parent.match(/^🗜 condense #\d+ — (.+)$/u) : null;
-    base = match?.[1]?.trim() || firstPrompt(snapshot);
-  }
-  if (base.length > 80) base = `${base.slice(0, 80).trim()}…`;
-  return `🗜 condense #${generation} — ${base}`;
-}
-
 async function prepareDecision(adapter: HostAdapter, decision: PrepareDecision) {
   const record = await loadAnalysisRecord(decision.receipt);
   const snapshot = await validateSnapshot(adapter, record);
   validateDecision(decision, record.candidates);
-  const titleRows = await rawTitleRows(snapshot.identity.transcriptPath);
-  const generation = parentGeneration(titleRows) + 1;
-  const title = condensedTitle(titleRows, snapshot, generation, decision.title);
+  const presentation = await adapter.preparePresentation(snapshot, decision.title);
   const omissions: Record<string, string> = {};
   for (const candidate of record.candidates) {
     if (candidate.class !== "thinking" && !shouldKeepCandidate(candidate, decision))
@@ -154,7 +99,7 @@ async function prepareDecision(adapter: HostAdapter, decision: PrepareDecision) 
     decision,
     omissionIds: omissions,
     sourceSessionId: snapshot.identity.sessionId,
-    generation,
+    generation: presentation.generation,
     keepTurns: record.config.keepTurns,
     prompts,
   });
@@ -190,9 +135,10 @@ async function prepareDecision(adapter: HostAdapter, decision: PrepareDecision) 
     config: record.config,
     decision,
     omissions,
-    generation,
-    title,
+    generation: presentation.generation,
+    title: presentation.title,
     plannedContextDigest: contextContentDigest(projection.rows, projection.markerText),
+    plannedMutations: projection.mutations,
     stats,
   });
   return {

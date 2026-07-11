@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { forkSession } from "@anthropic-ai/claude-agent-sdk";
-import type { ForkedSession, HostAdapter, SessionIdentity, SessionSnapshot } from "./host";
+import type { ForkedSession, HostAdapter, SessionIdentity, SessionPresentation, SessionSnapshot } from "./host";
 import { sha256 } from "./protocol";
 import {
   findCondenseOperationBoundary,
@@ -12,6 +13,7 @@ import {
   readTranscriptEntries,
   selectActiveTranscriptRows,
   validateCondenseSuffix,
+  writeTranscriptEntries,
   type JsonRecord,
   type TranscriptRow,
 } from "./transcript";
@@ -58,6 +60,57 @@ export function assertForkLineage(rows: TranscriptRow[]): void {
       throw new Error(`SDK fork row ${row.uuid} is missing forkedFrom.messageUuid`);
     }
   }
+}
+
+async function rawTitleRows(path: string): Promise<JsonRecord[]> {
+  return (await readFile(path, "utf8")).split("\n").flatMap((line) => {
+    try {
+      const row: unknown = JSON.parse(line);
+      return isRecord(row) && ["custom-title", "agent-name"].includes(String(row["type"])) ? [row] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function parentGeneration(rows: JsonRecord[]): number {
+  return rows.reduce((max, row) => {
+    if (row["type"] !== "custom-title") return max;
+    if (typeof row["condenseGeneration"] === "number") return Math.max(max, row["condenseGeneration"]);
+    const match = typeof row["customTitle"] === "string" ? row["customTitle"].match(/^🗜 condense #(\d+) —/u) : null;
+    return match?.[1] ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+}
+
+function firstPrompt(snapshot: SessionSnapshot): string {
+  for (const row of snapshot.contextEntries) {
+    if (row.type !== "user" || row["isMeta"] === true || row["condenseMarker"] === true || !isRecord(row.message))
+      continue;
+    const content = row.message["content"];
+    if (typeof content === "string" && content.trim()) return content.trim();
+    if (Array.isArray(content)) {
+      const text = content
+        .filter((block) => isRecord(block) && block["type"] === "text")
+        .map((block) => String((block as JsonRecord)["text"] ?? ""))
+        .join(" ")
+        .trim();
+      if (text) return text;
+    }
+  }
+  return "session";
+}
+
+function condensedTitle(rows: JsonRecord[], snapshot: SessionSnapshot, generation: number, override?: string): string {
+  let base = override ?? "";
+  if (!base) {
+    const parent = [...rows]
+      .reverse()
+      .find((row) => row["type"] === "custom-title" && typeof row["customTitle"] === "string")?.["customTitle"];
+    const match = typeof parent === "string" ? parent.match(/^🗜 condense #\d+ — (.+)$/u) : null;
+    base = match?.[1]?.trim() || firstPrompt(snapshot);
+  }
+  if (base.length > 80) base = `${base.slice(0, 80).trim()}…`;
+  return `🗜 condense #${generation} — ${base}`;
 }
 
 export class ClaudeCodeAdapter implements HostAdapter {
@@ -113,6 +166,12 @@ export class ClaudeCodeAdapter implements HostAdapter {
     };
   }
 
+  async preparePresentation(snapshot: SessionSnapshot, titleOverride?: string): Promise<SessionPresentation> {
+    const rows = await rawTitleRows(snapshot.identity.transcriptPath);
+    const generation = parentGeneration(rows) + 1;
+    return { generation, title: condensedTitle(rows, snapshot, generation, titleOverride) };
+  }
+
   async fork(snapshot: SessionSnapshot, title: string): Promise<ForkedSession> {
     const result = await forkSession(snapshot.identity.sessionId, {
       dir: snapshot.identity.projectCwd,
@@ -140,5 +199,47 @@ export class ClaudeCodeAdapter implements HostAdapter {
 
   async cleanupFork(fork: Pick<ForkedSession, "transcriptPath">): Promise<void> {
     await unlink(fork.transcriptPath).catch(() => undefined);
+  }
+
+  titleEntries(fork: ForkedSession, presentation: SessionPresentation): JsonRecord[] {
+    return [
+      {
+        type: "custom-title",
+        customTitle: presentation.title,
+        sessionId: fork.sessionId,
+        condenseGeneration: presentation.generation,
+      },
+      { type: "agent-name", agentName: presentation.title, sessionId: fork.sessionId },
+    ];
+  }
+
+  markerEntry(fork: ForkedSession, parentUuid: string, text: string): TranscriptRow {
+    const template = fork.messageRows.find((row) => row.type === "user" || row.type === "assistant");
+    if (!template) throw new Error("Could not construct the closing marker");
+    const fields: JsonRecord = { ...template };
+    for (const key of ["message", "uuid", "parentUuid", "type", "condenseMarker", "requestId", "isMeta", "forkedFrom"])
+      delete fields[key];
+    const maxMs = fork.messageRows.reduce((max, row) => {
+      const parsed = Date.parse(row.timestamp);
+      return Number.isFinite(parsed) ? Math.max(max, parsed) : max;
+    }, 0);
+    return {
+      ...fields,
+      type: "user",
+      uuid: randomUUID(),
+      parentUuid,
+      sessionId: fork.sessionId,
+      condenseMarker: true,
+      timestamp: new Date((maxMs || Date.now()) + 1000).toISOString(),
+      message: { role: "user", content: text },
+    } as TranscriptRow;
+  }
+
+  resumeCommand(sessionId: string): string {
+    return `/resume ${sessionId}`;
+  }
+
+  async publish(fork: ForkedSession, storageEntries: JsonRecord[]): Promise<void> {
+    await writeTranscriptEntries(fork.transcriptPath, storageEntries);
   }
 }

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { Attachment, AnalyzeInternal } from "./analyze";
 import type { CondenseConfig } from "./config";
 import type { DecisionInput, SessionIdentity, TokenProjection } from "./host";
+import type { PlannedMutation } from "./planner";
 import type { CandidateManifestItem } from "./protocol";
 import { durableRename } from "./durable";
 import { isRecord, type JsonRecord } from "./transcript";
@@ -60,6 +61,7 @@ export type PreparedRecord = {
   generation: number;
   title: string;
   plannedContextDigest: string;
+  plannedMutations: PlannedMutation[];
   stats: PreparedStats;
 };
 
@@ -126,7 +128,8 @@ function parseRecord(raw: unknown, expected: PendingRecord["type"]): PendingReco
     typeof raw["createdAt"] !== "string" ||
     raw["producer"] !== "condense@0.3.0" ||
     raw["selectionAlgorithm"] !== "claude-active-context-v1" ||
-    (expected === "prepared" && typeof raw["plannedContextDigest"] !== "string")
+    (expected === "prepared" &&
+      (typeof raw["plannedContextDigest"] !== "string" || !Array.isArray(raw["plannedMutations"])))
   ) {
     throw new Error(
       `Unsupported or malformed ${expected} record; rerun ${expected === "analysis" ? "analyze" : "prepare"}.`,
