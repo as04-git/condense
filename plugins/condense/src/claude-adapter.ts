@@ -7,18 +7,70 @@ import { forkSession } from "@anthropic-ai/claude-agent-sdk";
 import type { ForkedSession, HostAdapter, SessionIdentity, SessionPresentation, SessionSnapshot } from "./host";
 import { sha256 } from "./protocol";
 import {
-  findCondenseOperationBoundary,
+  isHumanUserRow,
   isRecord,
   isTranscriptRow,
   readTranscriptEntries,
   selectActiveTranscriptRows,
-  validateCondenseSuffix,
   writeTranscriptEntries,
   type JsonRecord,
   type TranscriptRow,
 } from "./transcript";
 
 const SDK_MESSAGE_TYPES = new Set(["user", "assistant", "attachment", "system", "progress"]);
+
+type CondenseBoundary = { operationUserUuid: string; cutoffUuid: string };
+
+function isClaudeCondenseMarker(row: TranscriptRow): boolean {
+  if (!isRecord(row.message) || !Array.isArray(row.message["content"])) return false;
+  if (row.type === "user" && row["isMeta"] === true) {
+    return row.message["content"].some(
+      (block) =>
+        isRecord(block) &&
+        typeof block["text"] === "string" &&
+        /Base directory for this skill:\s*[\s\S]*[\\/]skills[\\/]condense\b/.test(block["text"]),
+    );
+  }
+  if (row.type === "assistant") {
+    return row.message["content"].some(
+      (block) =>
+        isRecord(block) &&
+        block["type"] === "tool_use" &&
+        block["name"] === "Bash" &&
+        isRecord(block["input"]) &&
+        typeof block["input"]["command"] === "string" &&
+        /condense[\\/]src[\\/]condense\.ts\s+analyze\b/.test(block["input"]["command"]),
+    );
+  }
+  return false;
+}
+
+export function findClaudeCondenseOperationBoundary(rows: TranscriptRow[]): CondenseBoundary {
+  const byUuid = new Map(rows.map((row) => [row.uuid, row]));
+  const marker = [...rows].reverse().find(isClaudeCondenseMarker);
+  if (!marker) throw new Error("Could not identify the active /condense operation turn.");
+  let current: TranscriptRow | undefined = marker;
+  const seen = new Set<string>();
+  while (current && !isHumanUserRow(current)) {
+    if (seen.has(current.uuid)) throw new Error("Cycle while locating /condense operation boundary.");
+    seen.add(current.uuid);
+    current = current.parentUuid ? byUuid.get(current.parentUuid) : undefined;
+  }
+  if (!current || !current.parentUuid) throw new Error("The /condense operation has no preceding cutoff row.");
+  if (!byUuid.has(current.parentUuid)) throw new Error("The /condense cutoff is not in the active transcript.");
+  return { operationUserUuid: current.uuid, cutoffUuid: current.parentUuid };
+}
+
+export function validateClaudeCondenseSuffix(rows: TranscriptRow[], cutoffUuid: string): void {
+  const boundary = findClaudeCondenseOperationBoundary(rows);
+  if (boundary.cutoffUuid !== cutoffUuid) throw new Error("Transcript changed after analyze; run /condense again.");
+  const cutoffIndex = rows.findIndex((row) => row.uuid === cutoffUuid);
+  if (cutoffIndex < 0) throw new Error("Receipt cutoff is no longer in the active transcript.");
+  const unexpected = rows
+    .slice(cutoffIndex + 1)
+    .find((row) => isHumanUserRow(row) && row.uuid !== boundary.operationUserUuid);
+  if (unexpected) throw new Error("A real user message appeared after analyze; run /condense again.");
+}
 
 function projectDirectories(): string[] {
   const base = join(homedir(), ".claude", "projects");
@@ -156,8 +208,8 @@ export class ClaudeCodeAdapter implements HostAdapter {
     const entries = await readTranscriptEntries(identity.transcriptPath);
     const rows = entries.filter(isTranscriptRow);
     const active = selectActiveTranscriptRows(rows);
-    const boundary = findCondenseOperationBoundary(active);
-    if (expectedCutoffUuid) validateCondenseSuffix(active, expectedCutoffUuid);
+    const boundary = findClaudeCondenseOperationBoundary(active);
+    if (expectedCutoffUuid) validateClaudeCondenseSuffix(active, expectedCutoffUuid);
     const cutoffIndex = active.findIndex((row) => row.uuid === boundary.cutoffUuid);
     if (cutoffIndex < 0) throw new Error("The condense cutoff is not in the active context.");
     const contextEntries = active.slice(0, cutoffIndex + 1);

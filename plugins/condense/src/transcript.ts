@@ -204,58 +204,6 @@ export function isHumanUserRow(row: TranscriptRow): boolean {
   return row.type === "user" && row["condenseMarker"] !== true && !isToolResultRow(row) && row.isMeta !== true;
 }
 
-export function messageText(row: TranscriptRow): string {
-  if (!isRecord(row.message)) return "";
-  const content = row.message["content"];
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => {
-      if (!isRecord(block)) return typeof block === "string" ? block : "";
-      if (typeof block["text"] === "string") return block["text"];
-      if (block["type"] === "tool_use" && isRecord(block["input"]) && typeof block["input"]["command"] === "string") {
-        return block["input"]["command"];
-      }
-      return "";
-    })
-    .join("\n");
-}
-
-export type CondenseBoundary = { operationUserUuid: string; cutoffUuid: string };
-
-export function findCondenseOperationBoundary(rows: TranscriptRow[]): CondenseBoundary {
-  const byUuid = new Map(rows.map((row) => [row.uuid, row]));
-  const marker = [...rows].reverse().find((row) => {
-    const text = messageText(row);
-    return (
-      /Base directory for this skill:\s*[\s\S]*[\\/]skills[\\/]condense\b/.test(text) ||
-      /condense[\\/]src[\\/]condense\.ts\s+analyze\b/.test(text)
-    );
-  });
-  if (!marker) throw new Error("Could not identify the active /condense operation turn.");
-  let current: TranscriptRow | undefined = marker;
-  const seen = new Set<string>();
-  while (current && !isHumanUserRow(current)) {
-    if (seen.has(current.uuid)) throw new Error("Cycle while locating /condense operation boundary.");
-    seen.add(current.uuid);
-    current = current.parentUuid ? byUuid.get(current.parentUuid) : undefined;
-  }
-  if (!current || !current.parentUuid) throw new Error("The /condense operation has no preceding cutoff row.");
-  if (!byUuid.has(current.parentUuid)) throw new Error("The /condense cutoff is not in the active transcript.");
-  return { operationUserUuid: current.uuid, cutoffUuid: current.parentUuid };
-}
-
-export function validateCondenseSuffix(rows: TranscriptRow[], cutoffUuid: string): void {
-  const boundary = findCondenseOperationBoundary(rows);
-  if (boundary.cutoffUuid !== cutoffUuid) throw new Error("Transcript changed after analyze; run /condense again.");
-  const cutoffIndex = rows.findIndex((row) => row.uuid === cutoffUuid);
-  if (cutoffIndex < 0) throw new Error("Receipt cutoff is no longer in the active transcript.");
-  const unexpected = rows
-    .slice(cutoffIndex + 1)
-    .find((row) => isHumanUserRow(row) && row.uuid !== boundary.operationUserUuid);
-  if (unexpected) throw new Error("A real user message appeared after analyze; run /condense again.");
-}
-
 function getMessageId(row: TranscriptRow): string | null {
   return isRecord(row.message) && typeof row.message["id"] === "string" ? row.message["id"] : null;
 }

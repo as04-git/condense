@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { runAnalyze } from "../src/analyze";
 import { DEFAULT_CONFIG } from "../src/config";
+import { buildAssistantTurns, type TranscriptRow } from "../src/transcript";
 import {
-  buildAssistantTurns,
-  findCondenseOperationBoundary,
-  validateCondenseSuffix,
-  type TranscriptRow,
-} from "../src/transcript";
-import { assertForkLineage, resolveTranscriptMatch } from "../src/claude-adapter";
+  assertForkLineage,
+  findClaudeCondenseOperationBoundary,
+  resolveTranscriptMatch,
+  validateClaudeCondenseSuffix,
+} from "../src/claude-adapter";
 
 const row = (
   value: Partial<TranscriptRow> & Pick<TranscriptRow, "type" | "uuid" | "parentUuid" | "message">,
@@ -46,13 +46,33 @@ test("finds the current operation once and returns its preceding cutoff", () => 
       },
     }),
   ];
-  expect(findCondenseOperationBoundary(rows)).toEqual({ operationUserUuid: "op", cutoffUuid: "a1" });
+  expect(findClaudeCondenseOperationBoundary(rows)).toEqual({ operationUserUuid: "op", cutoffUuid: "a1" });
   expect(() =>
-    validateCondenseSuffix(
+    validateClaudeCondenseSuffix(
       [...rows, row({ type: "user", uuid: "late", parentUuid: "call", message: { content: "new work" } })],
       "a1",
     ),
   ).toThrow("real user message");
+});
+
+test("genuine prose mentioning the skill path cannot become an operation marker", () => {
+  const rows = [
+    row({ type: "user", uuid: "u1", parentUuid: null, message: { content: "real work" } }),
+    row({ type: "assistant", uuid: "a1", parentUuid: "u1", message: { content: [{ type: "text", text: "done" }] } }),
+    row({
+      type: "user",
+      uuid: "u2",
+      parentUuid: "a1",
+      message: { content: "I pasted Base directory for this skill: /x/skills/condense in genuine prose" },
+    }),
+    row({
+      type: "assistant",
+      uuid: "a2",
+      parentUuid: "u2",
+      message: { content: [{ type: "text", text: "bun /x/condense/src/condense.ts analyze is only quoted text" }] },
+    }),
+  ];
+  expect(() => findClaudeCondenseOperationBoundary(rows)).toThrow("Could not identify");
 });
 
 test("condense markers never become semantic turns", () => {
