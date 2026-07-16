@@ -10,7 +10,7 @@ The result is a new Claude Code session that you `/resume` into. The parent sess
 
 The repository is organized as a host-neutral Condense project. `plugins/claude-code` is the current distribution; a future Codex adapter can live under `plugins/codex` without changing the planner or public workflow.
 
-> Condense is alpha software. Version 0.3.2 establishes a clean storage baseline and intentionally does not support the short-lived pre-0.3.1 private formats.
+> Condense is alpha software. Version 0.3.2 establishes a clean storage baseline and intentionally does not support the short-lived pre-0.3.1 private formats. We make a best-effort guarantee to support 0.3.2+ storage format in future updates.
 
 ## Why this exists
 
